@@ -1,31 +1,43 @@
-from flask import Flask, jsonify, request
+from flask import Flask, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
-import os
 from flask_cors import CORS
+from sqlalchemy.dialects.mysql import JSON
+from sqlalchemy import text
+import json
+from datetime import datetime
+import logging
+import traceback
 
+# Configure logging
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
+
+# Initialize Flask app and SQLAlchemy
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "*"}})
 
+# Configure CORS to allow requests from the React frontend
+CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
+
+# Database configuration
 DB_USER = 'root'
-DB_PASSWORD = 'jaideep'
+DB_PASSWORD = 'rootroot'
 DB_HOST = 'localhost'
 DB_NAME = 'boskopartnersdb'
 
-# Configuring SQLAlchemy connection to MySQL Database.
+# Configure SQLAlchemy
 app.config['SQLALCHEMY_DATABASE_URI'] = f'mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}/{DB_NAME}'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-
+app.config['SQLALCHEMY_ECHO'] = True  # Log all SQL queries
 db = SQLAlchemy(app)
 
-# Models
-
+# Define models
 class Organization(db.Model):
     __tablename__ = 'organizations'
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(100), nullable=False)
     type = db.Column(db.Enum('church', 'school', 'other'), nullable=False)
     created_at = db.Column(db.DateTime, server_default=db.func.current_timestamp())
-
+    
     def __repr__(self):
         return f'<Organization {self.name}>'
 
@@ -34,18 +46,37 @@ class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(50), unique=True, nullable=False)
     email = db.Column(db.String(100), unique=True, nullable=False)
-    password = db.Column(db.String(255), nullable=False)  # hashed password
+    password = db.Column(db.String(255), nullable=False)
     role = db.Column(db.Enum('admin', 'user', 'manager', 'other'), default='user')
     organization_id = db.Column(db.Integer, db.ForeignKey('organizations.id'))
     firstname = db.Column(db.String(50))
     lastname = db.Column(db.String(50))
     created_at = db.Column(db.DateTime, server_default=db.func.current_timestamp())
     updated_at = db.Column(db.DateTime, server_default=db.func.current_timestamp(), onupdate=db.func.current_timestamp())
-
+    
+    # Relationship with Organization
     organization = db.relationship('Organization', backref=db.backref('users', lazy=True))
-
+    
     def __repr__(self):
         return f'<User {self.username}>'
+
+class UserDetails(db.Model):
+    __tablename__ = 'user_details'
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    organization_id = db.Column(db.Integer, db.ForeignKey('organizations.id'), nullable=False)
+    form_data = db.Column(JSON, nullable=True)  # Store JSON data
+    is_submitted = db.Column(db.Boolean, default=False)
+    last_page = db.Column(db.Integer, default=1)  # Track which page user is on
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    user = db.relationship('User', backref=db.backref('details', lazy=True))
+    organization = db.relationship('Organization', backref=db.backref('details', lazy=True))
+    
+    def __repr__(self):
+        return f'<UserDetails user_id={self.user_id}>'
 
 # Routes
 
@@ -96,12 +127,293 @@ def login():
         }
     }), 200
 
+# Add these API endpoints
+@app.route('/api/user-details/<int:user_id>', methods=['GET'])
+def get_user_details(user_id):
+    """Get user form data to resume editing"""
+    logger.info(f"GET request for user_details with user_id: {user_id}")
+    
+    try:
+        user_details = UserDetails.query.filter_by(user_id=user_id).first()
+        
+        if not user_details:
+            logger.info(f"No form data found for user_id: {user_id}")
+            return jsonify({"message": "No form data found"}), 404
+        
+        response_data = {
+            "form_data": user_details.form_data,
+            "last_page": user_details.last_page,
+            "is_submitted": user_details.is_submitted
+        }
+        logger.info(f"Returning user_details for user_id {user_id}: {response_data}")
+        return jsonify(response_data), 200
+    except Exception as e:
+        logger.error(f"Error retrieving user details: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/user-details/save', methods=['POST'])
+def save_user_details():
+    """Save form data (both Save & Continue and Save & Exit)"""
+    logger.info("POST request to save user_details")
+    
+    try:
+        data = request.json
+        logger.debug(f"Received data: {data}")
+        
+        user_id = data.get('user_id')
+        organization_id = data.get('organization_id')
+        form_data = data.get('form_data', {})
+        last_page = data.get('current_page', 1)
+        action = data.get('action', 'continue')  # 'continue' or 'exit'
+        
+        if not user_id or not organization_id:
+            logger.error("Missing required fields: user_id or organization_id")
+            return jsonify({"error": "Missing required fields"}), 400
+        
+        logger.info(f"Processing save for user_id: {user_id}, org_id: {organization_id}, page: {last_page}, action: {action}")
+        
+        # Check if user exists
+        user = User.query.get(user_id)
+        if not user:
+            logger.error(f"User with ID {user_id} not found")
+            return jsonify({"error": f"User with ID {user_id} not found"}), 404
+            
+        # Check if organization exists
+        org = Organization.query.get(organization_id)
+        if not org:
+            logger.error(f"Organization with ID {organization_id} not found")
+            return jsonify({"error": f"Organization with ID {organization_id} not found"}), 404
+        
+        # Find existing or create new
+        user_details = UserDetails.query.filter_by(user_id=user_id).first()
+        
+        if not user_details:
+            logger.info(f"Creating new UserDetails record for user_id: {user_id}")
+            user_details = UserDetails(
+                user_id=user_id,
+                organization_id=organization_id,
+                form_data=form_data,
+                last_page=last_page
+            )
+            db.session.add(user_details)
+        else:
+            logger.info(f"Updating existing UserDetails record for user_id: {user_id}")
+            # Update existing record
+            user_details.form_data = form_data
+            user_details.last_page = last_page
+            user_details.updated_at = datetime.utcnow()
+        
+        db.session.commit()
+        logger.info(f"Successfully saved user_details for user_id: {user_id}")
+        
+        return jsonify({
+            "message": "Data saved successfully",
+            "action": action,
+            "last_page": last_page
+        }), 200
+    except Exception as e:
+        logger.error(f"Error saving user_details: {str(e)}")
+        logger.error(traceback.format_exc())
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/user-details/submit', methods=['POST'])
+def submit_user_details():
+    """Final submission of the form"""
+    logger.info("POST request to submit user_details")
+    
+    try:
+        data = request.json
+        logger.debug(f"Received data: {data}")
+        
+        user_id = data.get('user_id')
+        form_data = data.get('form_data', {})
+        organization_id = data.get('organization_id', 1)  # Default to 1 if not provided
+        
+        if not user_id:
+            logger.error("Missing required field: user_id")
+            return jsonify({"error": "Missing required field: user_id"}), 400
+            
+        # Check if user exists
+        user = User.query.get(user_id)
+        if not user:
+            logger.error(f"User with ID {user_id} not found")
+            return jsonify({"error": f"User with ID {user_id} not found"}), 404
+        
+        # Find existing user details or create new
+        user_details = UserDetails.query.filter_by(user_id=user_id).first()
+        
+        if not user_details:
+            logger.info(f"Creating new user details record for user_id: {user_id}")
+            user_details = UserDetails(
+                user_id=user_id,
+                organization_id=organization_id,
+                form_data=form_data,
+                is_submitted=True,
+                last_page=3  # Assuming submission is from the last page
+            )
+            db.session.add(user_details)
+        else:
+            logger.info(f"Updating existing user details record for user_id: {user_id}")
+            # Update and mark as submitted
+            user_details.form_data = form_data
+            user_details.is_submitted = True
+            user_details.updated_at = datetime.utcnow()
+        
+        db.session.commit()
+        logger.info(f"Successfully submitted form for user_id: {user_id}")
+        
+        return jsonify({
+            "message": "Form submitted successfully"
+        }), 200
+    except Exception as e:
+        logger.error(f"Error submitting user_details: {str(e)}")
+        logger.error(traceback.format_exc())
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 500
+
+# Add this API endpoint to view all user details
+@app.route('/api/user-details', methods=['GET'])
+def get_all_user_details():
+    """Retrieve all user details from the database"""
+    user_details = UserDetails.query.all()
+    print(f"Number of user details retrieved: {len(user_details)}")
+    user_details_list = []
+    for detail in user_details:
+        user_details_list.append({
+            'id': detail.id,
+            'user_id': detail.user_id,
+            'organization_id': detail.organization_id,
+            'form_data': detail.form_data,
+            'is_submitted': detail.is_submitted,
+            'last_page': detail.last_page,
+            'created_at': detail.created_at.isoformat() if detail.created_at else None,
+            'updated_at': detail.updated_at.isoformat() if detail.updated_at else None
+        })
+        print(f"User Details: {detail.id}, {detail.user_id}, {detail.organization_id}, {detail.form_data}, {detail.is_submitted}")
+    return jsonify(user_details_list), 200
+
+# Add a test endpoint to verify database connectivity
+@app.route('/api/test-database', methods=['GET'])
+def test_database():
+    """Test database connectivity and insertion"""
+    logger.info("Testing database connectivity")
+    
+    try:
+        # Test database connection
+        db.session.execute("SELECT 1")
+        
+        # Create a test user_details entry
+        test_data = {
+            "personal": {
+                "firstName": "Test",
+                "lastName": "User"
+            },
+            "organizational": {
+                "country": "Test Country",
+                "region": "Test Region"
+            }
+        }
+        
+        # Create a test record
+        test_detail = UserDetails(
+            user_id=999,
+            organization_id=1,
+            form_data=test_data,
+            last_page=1
+        )
+        
+        # Add and commit to test insertion
+        db.session.add(test_detail)
+        db.session.commit()
+        
+        # Query to verify it was added
+        inserted_record = UserDetails.query.filter_by(user_id=999).first()
+        
+        if inserted_record:
+            # Delete the test record
+            db.session.delete(inserted_record)
+            db.session.commit()
+            
+            return jsonify({
+                "status": "success",
+                "message": "Database connection and insertion test successful"
+            }), 200
+        else:
+            return jsonify({
+                "status": "error",
+                "message": "Failed to verify inserted record"
+            }), 500
+            
+    except Exception as e:
+        logger.error(f"Database test failed: {str(e)}")
+        logger.error(traceback.format_exc())
+        db.session.rollback()
+        return jsonify({
+            "status": "error",
+            "message": f"Database test failed: {str(e)}"
+        }), 500
+
+# Make sure users and organizations exist for testing
+@app.route('/api/initialize-test-data', methods=['GET'])
+def initialize_test_data():
+    """Initialize test data for the application"""
+    try:
+        # Check if test organization exists
+        test_org = Organization.query.filter_by(name="Test Organization").first()
+        if not test_org:
+            test_org = Organization(name="Test Organization", type="other")
+            db.session.add(test_org)
+            db.session.commit()
+        
+        # Check if test user exists
+        test_user = User.query.filter_by(username="testuser").first()
+        if not test_user:
+            test_user = User(
+                username="testuser",
+                email="test@example.com",
+                password="password",
+                role="user",
+                organization_id=test_org.id,
+                firstname="Test",
+                lastname="User"
+            )
+            db.session.add(test_user)
+            db.session.commit()
+            
+        return jsonify({
+            "status": "success",
+            "message": "Test data initialized successfully",
+            "test_user_id": test_user.id,
+            "test_org_id": test_org.id
+        }), 200
+    except Exception as e:
+        logger.error(f"Error initializing test data: {str(e)}")
+        logger.error(traceback.format_exc())
+        db.session.rollback()
+        return jsonify({
+            "status": "error",
+            "message": f"Error initializing test data: {str(e)}"
+        }), 500
+
+# Add a simple test endpoint to verify API is working
+@app.route('/api/test', methods=['GET'])
+def test_api():
+    """Simple test endpoint to verify API is working"""
+    return jsonify({
+        "status": "success",
+        "message": "API is working"
+    }), 200
 
 # To initialize the database tables (run once)
 @app.cli.command('init-db')
 def init_db():
     db.create_all()
-    print("Initialized the database.")
+    print("Database tables created successfully!")
 
 if __name__ == '__main__':
+    with app.app_context():
+        # Create tables if they don't exist
+        db.create_all()
     app.run(debug=True)
