@@ -88,7 +88,7 @@ def login():
     # Signal that the login is successful (redirect to landing page on frontend)
     return jsonify({
         "message": "Login successful",
-        "user": {
+        "data": {
             "id": user.id,
             "username": user.username,
             "email": user.email,
