@@ -23,7 +23,7 @@ CORS(app, resources={r"/api/*": {"origins": "*"}}, supports_credentials=True)
 
 # Database configuration
 DB_USER = 'root'
-DB_PASSWORD = 'jaideep'
+DB_PASSWORD = 'rootroot'
 DB_HOST = 'localhost'
 DB_NAME = 'boskopartnersdb'
 
@@ -80,7 +80,6 @@ class UserDetails(db.Model):
     
     def __repr__(self):
         return f'<UserDetails user_id={self.user_id}>'
-
 
 class Survey(db.Model):
     __tablename__ = 'surveys'
@@ -200,27 +199,99 @@ def validate_survey():
 # Add these API endpoints
 @app.route('/api/user-details/<int:user_id>', methods=['GET'])
 def get_user_details(user_id):
-    """Get user form data to resume editing"""
-    logger.info(f"GET request for user_details with user_id: {user_id}")
-    
+    """
+    Retrieve user details for a specific user.
+    This is used to load saved form data when a user returns to continue filling out the form.
+    """
     try:
-        user_details = UserDetails.query.filter_by(user_id=user_id).first()
+        # Check if user exists
+        user = User.query.get(user_id)
+        if not user:
+            return jsonify({"error": "User not found"}), 404
         
-        if not user_details:
-            logger.info(f"No form data found for user_id: {user_id}")
-            return jsonify({"message": "No form data found"}), 404
+        # Get user details
+        details = UserDetails.query.filter_by(user_id=user_id).first()
         
-        response_data = {
-            "form_data": user_details.form_data,
-            "last_page": user_details.last_page,
-            "is_submitted": user_details.is_submitted
-        }
-        logger.info(f"Returning user_details for user_id {user_id}: {response_data}")
-        return jsonify(response_data), 200
+        if not details:
+            # Return empty data if no details exist yet
+            return jsonify({
+                "user_id": user_id,
+                "form_data": {
+                    "personal": {},
+                    "organizational": {}
+                },
+                "is_submitted": False,
+                "last_page": 1
+            }), 200
+        
+        # Return user details
+        return jsonify({
+            "user_id": details.user_id,
+            "organization_id": details.organization_id,
+            "form_data": details.form_data,
+            "is_submitted": details.is_submitted,
+            "last_page": details.last_page
+        }), 200
+        
     except Exception as e:
         logger.error(f"Error retrieving user details: {str(e)}")
         logger.error(traceback.format_exc())
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "An error occurred while retrieving user details"}), 500
+
+@app.route('/api/user-details/status/<int:user_id>', methods=['GET'])
+def get_user_details_status(user_id):
+    """
+    Get the status of user details for the dashboard.
+    Returns whether personal details are filled and other status information.
+    """
+    try:
+        # Check if user exists
+        user = User.query.get(user_id)
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+        
+        # Get user details
+        details = UserDetails.query.filter_by(user_id=user_id).first()
+        
+        if not details:
+            # Return default status if no details exist yet
+            return jsonify({
+                "user_id": user_id,
+                "personal_details_filled": False,
+                "organizational_details_filled": False,
+                "is_submitted": False,
+                "last_page": 1
+            }), 200
+        
+        # Check if personal details are filled (first name and last name are required)
+        personal_filled = False
+        organizational_filled = False
+        
+        if details.form_data and 'personal' in details.form_data:
+            personal = details.form_data['personal']
+            if personal.get('firstName') and personal.get('lastName'):
+                personal_filled = True
+        
+        if details.form_data and 'organizational' in details.form_data:
+            org = details.form_data['organizational']
+            if (org.get('country') and org.get('region') and 
+                org.get('church') and org.get('school')):
+                organizational_filled = True
+        
+        # Return status information
+        return jsonify({
+            "user_id": details.user_id,
+            "personal_details_filled": personal_filled,
+            "organizational_details_filled": organizational_filled,
+            "is_submitted": details.is_submitted,
+            "last_page": details.last_page,
+            "form_data": details.form_data  # Include form data for display on dashboard
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error retrieving user details status: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({"error": "An error occurred while retrieving user details status"}), 500
 
 @app.route('/api/user-details/save', methods=['POST'])
 def save_user_details():
