@@ -7,6 +7,9 @@ import json
 from datetime import datetime
 import logging
 import traceback
+import uuid
+from sqlalchemy import event
+from uuid import uuid4
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
@@ -16,11 +19,11 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 # Configure CORS to allow requests from the React frontend
-CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
+CORS(app, resources={r"/api/*": {"origins": "*"}}, supports_credentials=True)
 
 # Database configuration
 DB_USER = 'root'
-DB_PASSWORD = 'rootroot'
+DB_PASSWORD = 'jaideep'
 DB_HOST = 'localhost'
 DB_NAME = 'boskopartnersdb'
 
@@ -78,6 +81,24 @@ class UserDetails(db.Model):
     def __repr__(self):
         return f'<UserDetails user_id={self.user_id}>'
 
+
+class Survey(db.Model):
+    __tablename__ = 'surveys'
+    id = db.Column(db.Integer, primary_key=True)
+    survey_code = db.Column(db.String(36), nullable=False, unique=True, default=lambda: str(uuid.uuid4()))
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    answers = db.Column(JSON, nullable=True)
+    status = db.Column(db.Enum('pending','in_progress','completed'), 
+                       nullable=False, default='pending')
+    created_at = db.Column(db.DateTime, server_default=db.func.current_timestamp())
+    updated_at = db.Column(db.DateTime, server_default=db.func.current_timestamp(),
+                           onupdate=db.func.current_timestamp())
+
+    user = db.relationship('User', backref=db.backref('surveys', lazy=True))
+
+    def __repr__(self):
+        return f'<Survey {self.survey_code} for User {self.user_id}>'
+
 # Routes
 
 @app.route('/')
@@ -126,6 +147,55 @@ def login():
             "role": user.role
         }
     }), 200
+
+
+@app.route('/api/users/register', methods=['POST'])
+def register():
+    data = request.get_json()
+    new_user = User(
+      username=data['username'],
+      email   =data['email'],
+      password=data['password'],
+      role    ='user',
+      organization_id=data['organization_id']
+    )
+    db.session.add(new_user)
+    db.session.flush()   # so new_user.id is set
+
+    new_survey = Survey(
+      user_id    = new_user.id,
+      survey_code= str(uuid4()),
+      answers    = {}
+    )
+    db.session.add(new_survey)
+    db.session.commit()
+    
+    return jsonify({ "message": "User + survey created", "user_id": new_user.id }), 201
+
+@app.route('/api/surveys/validate', methods=['POST'])
+def validate_survey():
+    """
+    Expects JSON { "survey_code": "<code>" }.
+    Returns 200 + survey info if valid, 400 if missing code, 404 if not found.
+    """
+    data = request.get_json() or {}
+    code = data.get("survey_code")
+    if not code:
+        return jsonify({"error": "survey_code is required"}), 400
+
+    survey = Survey.query.filter_by(survey_code=code).first()
+    if not survey:
+        return jsonify({"error": "Invalid survey code"}), 404
+
+    # Build whatever payload the frontend needs
+    payload = {
+        "id": survey.id,
+        "survey_code": survey.survey_code,
+        "user_id": survey.user_id,
+        "status": survey.status,
+        "answers": survey.answers or {}
+    }
+    return jsonify({"valid": True, "survey": payload}), 200
 
 # Add these API endpoints
 @app.route('/api/user-details/<int:user_id>', methods=['GET'])

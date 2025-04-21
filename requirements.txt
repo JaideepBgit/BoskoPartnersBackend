@@ -2,3 +2,4 @@ Flask
 Flask-SQLAlchemy
 pymysql
 flask-cors
+cryptography
