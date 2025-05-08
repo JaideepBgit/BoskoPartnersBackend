@@ -3,6 +3,7 @@ from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
 from sqlalchemy.dialects.mysql import JSON
 from sqlalchemy import text
+from sqlalchemy import UniqueConstraint
 import json
 from datetime import datetime
 import logging
@@ -10,6 +11,8 @@ import traceback
 import uuid
 from sqlalchemy import event
 from uuid import uuid4
+import os
+from werkzeug.utils import secure_filename
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
@@ -19,11 +22,16 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 # Configure CORS to allow requests from the React frontend
-CORS(app, resources={r"/api/*": {"origins": "*"}}, supports_credentials=True)
+CORS(
+    app,
+    resources={r"/api/*": {"origins": "http://localhost:3000"}},
+    supports_credentials=True,
+    allow_headers=["Content-Type", "Authorization"]
+)
 
 # Database configuration
 DB_USER = 'root'
-DB_PASSWORD = 'rootroot'
+DB_PASSWORD = 'jaideep'
 DB_HOST = 'localhost'
 DB_NAME = 'boskopartnersdb'
 
@@ -33,12 +41,28 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['SQLALCHEMY_ECHO'] = True  # Log all SQL queries
 db = SQLAlchemy(app)
 
+# Function to create tables if they don't exist
+def create_tables():
+    with app.app_context():
+        db.create_all()
+        print("Tables created or already exist.")
+
 # Define models
 class Organization(db.Model):
     __tablename__ = 'organizations'
     id = db.Column(db.Integer, primary_key=True)
+    denomination_id = db.Column(db.Integer, db.ForeignKey('denominations.id'), nullable=True)
+    accreditation_body_id = db.Column(db.Integer, db.ForeignKey('accreditation_bodies.id'), nullable=True)
+    umbrella_association_id = db.Column(db.Integer, db.ForeignKey('umbrella_associations.id'), nullable=True)
+    primary_contact_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    secondary_contact_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     name = db.Column(db.String(100), nullable=False)
     type = db.Column(db.Enum('church', 'school', 'other'), nullable=False)
+    continent = db.Column(db.String(50), nullable=True)
+    region = db.Column(db.String(50), nullable=True)
+    province = db.Column(db.String(50), nullable=True)
+    city = db.Column(db.String(50), nullable=True)
+    town = db.Column(db.String(50), nullable=True)
     created_at = db.Column(db.DateTime, server_default=db.func.current_timestamp())
     
     def __repr__(self):
@@ -47,18 +71,19 @@ class Organization(db.Model):
 class User(db.Model):
     __tablename__ = 'users'
     id = db.Column(db.Integer, primary_key=True)
+    organization_id = db.Column(db.Integer, db.ForeignKey('organizations.id'), nullable=True)
     username = db.Column(db.String(50), unique=True, nullable=False)
     email = db.Column(db.String(100), unique=True, nullable=False)
     password = db.Column(db.String(255), nullable=False)
     role = db.Column(db.Enum('admin', 'user', 'manager', 'other'), default='user')
-    organization_id = db.Column(db.Integer, db.ForeignKey('organizations.id'))
     firstname = db.Column(db.String(50))
     lastname = db.Column(db.String(50))
+    survey_code = db.Column(db.String(36), nullable=True)  # UUID as string for user surveys
     created_at = db.Column(db.DateTime, server_default=db.func.current_timestamp())
     updated_at = db.Column(db.DateTime, server_default=db.func.current_timestamp(), onupdate=db.func.current_timestamp())
     
     # Relationship with Organization
-    organization = db.relationship('Organization', backref=db.backref('users', lazy=True))
+    organization = db.relationship('Organization', foreign_keys=[organization_id], backref=db.backref('users', lazy=True))
     
     def __repr__(self):
         return f'<User {self.username}>'
@@ -81,28 +106,199 @@ class UserDetails(db.Model):
     def __repr__(self):
         return f'<UserDetails user_id={self.user_id}>'
 
-class Survey(db.Model):
-    __tablename__ = 'surveys'
+class SurveyTemplateVersion(db.Model):
+    __tablename__ = 'survey_template_versions'
     id = db.Column(db.Integer, primary_key=True)
-    survey_code = db.Column(db.String(36), nullable=False, unique=True, default=lambda: str(uuid.uuid4()))
+    name = db.Column(db.String(100), nullable=False)
+    description = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, server_default=db.func.current_timestamp())
+    
+    def __repr__(self):
+        return f'<SurveyTemplateVersion {self.name}>'    
+
+class SurveyTemplate(db.Model):
+    __tablename__ = 'survey_templates'
+    id = db.Column(db.Integer, primary_key=True)
+    version_id = db.Column(db.Integer, db.ForeignKey('survey_template_versions.id'), nullable=False)
+    survey_code = db.Column(db.String(100), nullable=False, unique=True)
+    questions = db.Column(JSON, nullable=False)
+    created_at = db.Column(db.DateTime, server_default=db.func.current_timestamp())
+    updated_at = db.Column(db.DateTime, server_default=db.func.current_timestamp(),
+                           onupdate=db.func.current_timestamp())
+    
+    # Relationships
+    version = db.relationship('SurveyTemplateVersion', backref=db.backref('templates', lazy=True))
+    
+    def __repr__(self):
+        return f'<SurveyTemplate {self.survey_code}>'    
+
+class SurveyResponse(db.Model):
+    __tablename__ = 'survey_responses'
+    id = db.Column(db.Integer, primary_key=True)
+    template_id = db.Column(db.Integer, db.ForeignKey('survey_templates.id'), nullable=False)
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
-    answers = db.Column(JSON, nullable=True)
+    answers = db.Column(JSON, nullable=False)
     status = db.Column(db.Enum('pending','in_progress','completed'), 
                        nullable=False, default='pending')
     created_at = db.Column(db.DateTime, server_default=db.func.current_timestamp())
     updated_at = db.Column(db.DateTime, server_default=db.func.current_timestamp(),
                            onupdate=db.func.current_timestamp())
-
-    user = db.relationship('User', backref=db.backref('surveys', lazy=True))
+    
+    # Relationships
+    template = db.relationship('SurveyTemplate', backref=db.backref('responses', lazy=True))
+    user = db.relationship('User', backref=db.backref('survey_responses', lazy=True))
+    
+    def __repr__(self):
+        return f'<SurveyResponse {self.id} for template {self.template_id}>'
 
     def __repr__(self):
         return f'<Survey {self.survey_code} for User {self.user_id}>'
+
+class SurveyVersion(db.Model):
+    __tablename__ = 'survey_versions'
+    id = db.Column(db.Integer, primary_key=True)
+    survey_id = db.Column(db.Integer, db.ForeignKey('survey_templates.id'), nullable=False)
+    version_number = db.Column(db.Integer, nullable=False)
+    created_at = db.Column(db.DateTime, server_default=db.func.current_timestamp())
+    __table_args__ = (UniqueConstraint('survey_id', 'version_number'),)
+    survey = db.relationship('SurveyTemplate', backref=db.backref('versions', lazy=True))
+
+    def __repr__(self):
+        return f'<SurveyVersion survey_id={self.survey_id} v{self.version_number}>'
+
+class QuestionType(db.Model):
+    __tablename__ = 'question_types'
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(50), nullable=False, unique=True)
+    
+    def __repr__(self):
+        return f'<QuestionType {self.name}>'
+
+class Question(db.Model):
+    __tablename__ = 'questions'
+    id = db.Column(db.Integer, primary_key=True)
+    template_id = db.Column(db.Integer, db.ForeignKey('survey_templates.id'), nullable=False)
+    question_type_id = db.Column(db.Integer, db.ForeignKey('question_types.id'), nullable=False)
+    question_text = db.Column(db.Text, nullable=False)
+    order = db.Column(db.Integer, nullable=False)
+    is_required = db.Column(db.Boolean, default=False)
+    config = db.Column(JSON, nullable=True)
+    created_at = db.Column(db.DateTime, server_default=db.func.current_timestamp())
+    updated_at = db.Column(db.DateTime, server_default=db.func.current_timestamp(), onupdate=db.func.current_timestamp())
+    
+    # Relationships
+    template = db.relationship('SurveyTemplate', backref=db.backref('question_list', lazy=True))
+    type = db.relationship('QuestionType')
+    
+    def __repr__(self):
+        return f'<Question {self.question_text[:20]}...>'
+
+class QuestionOption(db.Model):
+    __tablename__ = 'question_options'
+    id = db.Column(db.Integer, primary_key=True)
+    question_id = db.Column(db.Integer, db.ForeignKey('questions.id'), nullable=False)
+    option_text = db.Column(db.String(255), nullable=False)
+    sort_order = db.Column(db.Integer, nullable=False)
+    question = db.relationship('Question', backref=db.backref('options', lazy=True))
+
+    def __repr__(self):
+        return f'<QuestionOption q_id={self.question_id} option={self.option_text}>'
+
+# Define additional models for the new requirements
+class Denomination(db.Model):
+    __tablename__ = 'denominations'
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100), nullable=False)
+    description = db.Column(db.Text, nullable=True)
+    
+    def __repr__(self):
+        return f'<Denomination {self.name}>'
+
+class AccreditationBody(db.Model):
+    __tablename__ = 'accreditation_bodies'
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100), nullable=False)
+    description = db.Column(db.Text, nullable=True)
+    
+    def __repr__(self):
+        return f'<AccreditationBody {self.name}>'
+
+class UmbrellaAssociation(db.Model):
+    __tablename__ = 'umbrella_associations'
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100), nullable=False)
+    description = db.Column(db.Text, nullable=True)
+    
+    def __repr__(self):
+        return f'<UmbrellaAssociation {self.name}>'
+
+class InstitutionDetail(db.Model):
+    __tablename__ = 'institution_details'
+    organization_id = db.Column(db.Integer, db.ForeignKey('organizations.id'), primary_key=True)
+    town = db.Column(db.String(100), nullable=True)
+    highest_education = db.Column(db.String(100), nullable=True)
+    
+    # Relationship
+    organization = db.relationship('Organization', backref=db.backref('institution_detail', uselist=False, lazy=True))
+    
+    def __repr__(self):
+        return f'<InstitutionDetail for org_id={self.organization_id}>'
+
+class ChurchDetail(db.Model):
+    __tablename__ = 'church_details'
+    organization_id = db.Column(db.Integer, db.ForeignKey('organizations.id'), primary_key=True)
+    senior_pastor_name = db.Column(db.String(100), nullable=True)
+    pastor_email = db.Column(db.String(100), nullable=True)
+    umbrella_association = db.Column(db.String(100), nullable=True)
+    
+    # Relationship
+    organization = db.relationship('Organization', backref=db.backref('church_detail', uselist=False, lazy=True))
+    
+    def __repr__(self):
+        return f'<ChurchDetail for org_id={self.organization_id}>'
+
+class NonformalOrgDetail(db.Model):
+    __tablename__ = 'nonformal_org_details'
+    organization_id = db.Column(db.Integer, db.ForeignKey('organizations.id'), primary_key=True)
+    org_lead = db.Column(db.String(100), nullable=True)
+    lead_email = db.Column(db.String(100), nullable=True)
+    
+    # Relationship
+    organization = db.relationship('Organization', backref=db.backref('nonformal_detail', uselist=False, lazy=True))
+    
+    def __repr__(self):
+        return f'<NonformalOrgDetail for org_id={self.organization_id}>'
+
+class Role(db.Model):
+    __tablename__ = 'roles'
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(50), nullable=False, unique=True)
+    description = db.Column(db.Text, nullable=True)
+    
+    def __repr__(self):
+        return f'<Role {self.name}>'
+
+class OrganizationUserRole(db.Model):
+    __tablename__ = 'organization_user_roles'
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    organization_id = db.Column(db.Integer, db.ForeignKey('organizations.id'), nullable=False)
+    role_id = db.Column(db.Integer, db.ForeignKey('roles.id'), nullable=False)
+    assigned_at = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    user = db.relationship('User', backref=db.backref('organization_roles', lazy=True))
+    organization = db.relationship('Organization', backref=db.backref('user_roles', lazy=True))
+    role = db.relationship('Role', backref=db.backref('assignments', lazy=True))
+    
+    def __repr__(self):
+        return f'<OrganizationUserRole user_id={self.user_id}, org_id={self.organization_id}, role_id={self.role_id}>'
 
 # Routes
 
 @app.route('/')
 def index():
-    return "Hello, welcome to the Flask app!"
+    return "Hello, welcome to the Bosko Partners app!"
 
 # Example route to list users
 @app.route('/users', methods=['GET'])
@@ -141,6 +337,7 @@ def login():
         "message": "Login successful",
         "data": {
             "id": user.id,
+            "organization_id": user.organization_id,
             "username": user.username,
             "email": user.email,
             "role": user.role
@@ -151,25 +348,25 @@ def login():
 @app.route('/api/users/register', methods=['POST'])
 def register():
     data = request.get_json()
+    # Generate a UUID for the survey code if role is 'user'
+    survey_code = str(uuid4()) if data.get('role', 'user') == 'user' else None
+    
     new_user = User(
       username=data['username'],
       email   =data['email'],
       password=data['password'],
-      role    ='user',
-      organization_id=data['organization_id']
+      role=data.get('role', 'user'),
+      organization_id=data['organization_id'],
+      survey_code=survey_code
     )
     db.session.add(new_user)
-    db.session.flush()   # so new_user.id is set
-
-    new_survey = Survey(
-      user_id    = new_user.id,
-      survey_code= str(uuid4()),
-      answers    = {}
-    )
-    db.session.add(new_survey)
     db.session.commit()
     
-    return jsonify({ "message": "User + survey created", "user_id": new_user.id }), 201
+    return jsonify({ 
+        "message": "User created successfully", 
+        "user_id": new_user.id,
+        "survey_code": survey_code
+    }), 201
 
 @app.route('/api/surveys/validate', methods=['POST'])
 def validate_survey():
@@ -182,17 +379,19 @@ def validate_survey():
     if not code:
         return jsonify({"error": "survey_code is required"}), 400
 
-    survey = Survey.query.filter_by(survey_code=code).first()
-    if not survey:
+    # Find the user with this survey code
+    user = User.query.filter_by(survey_code=code).first()
+    if not user:
         return jsonify({"error": "Invalid survey code"}), 404
 
     # Build whatever payload the frontend needs
     payload = {
-        "id": survey.id,
-        "survey_code": survey.survey_code,
-        "user_id": survey.user_id,
-        "status": survey.status,
-        "answers": survey.answers or {}
+        "id": user.id,
+        "username": user.username,
+        "email": user.email,
+        "survey_code": user.survey_code,
+        "organization_id": user.organization_id,
+        "role": user.role
     }
     return jsonify({"valid": True, "survey": payload}), 200
 
@@ -252,7 +451,7 @@ def get_user_details_status(user_id):
         
         # Get user details
         details = UserDetails.query.filter_by(user_id=user_id).first()
-        
+        logger.info(f"Fetched details: {details!r}")
         if not details:
             # Return default status if no details exist yet
             return jsonify({
@@ -547,6 +746,705 @@ def test_api():
         "message": "API is working"
     }), 200
 
+# Survey Template API Endpoints
+@app.route('/api/template-versions', methods=['GET'])
+def get_template_versions():
+    versions = SurveyTemplateVersion.query.all()
+    return jsonify([{"id": v.id, "name": v.name, "description": v.description, "created_at": v.created_at} for v in versions]), 200
+
+@app.route('/api/template-versions', methods=['POST'])
+def add_template_version():
+    data = request.get_json() or {}
+    if 'name' not in data:
+        return jsonify({'error': 'name required'}), 400
+    version = SurveyTemplateVersion(
+        name=data['name'],
+        description=data.get('description')
+    )
+    db.session.add(version)
+    db.session.commit()
+    return jsonify({
+        'id': version.id, 
+        'name': version.name, 
+        'description': version.description
+    }), 201
+
+@app.route('/api/template-versions/<int:version_id>', methods=['DELETE'])
+def delete_template_version(version_id):
+    version = SurveyTemplateVersion.query.get_or_404(version_id)
+    db.session.delete(version)
+    db.session.commit()
+    return jsonify({'deleted': True}), 200
+
+@app.route('/api/templates', methods=['GET'])
+def get_templates():
+    templates = SurveyTemplate.query.all()
+    return jsonify([{
+        "id": t.id, 
+        "version_id": t.version_id,
+        "version_name": t.version.name,
+        "survey_code": t.survey_code,
+        "created_at": t.created_at
+    } for t in templates]), 200
+
+@app.route('/api/templates', methods=['POST'])
+def add_template():
+    data = request.get_json() or {}
+    required_keys = ['version_id', 'survey_code', 'questions']
+    if not all(k in data for k in required_keys):
+        return jsonify({'error': 'Missing required fields'}), 400
+    
+    # Check for duplicate survey_code
+    existing = SurveyTemplate.query.filter_by(survey_code=data['survey_code']).first()
+    if existing:
+        return jsonify({'error': 'Survey code already exists'}), 400
+        
+    template = SurveyTemplate(
+        version_id=data['version_id'],
+        survey_code=data['survey_code'],
+        questions=data['questions'],
+    )
+    db.session.add(template)
+    db.session.commit()
+    return jsonify({
+        'id': template.id,
+        'survey_code': template.survey_code
+    }), 201
+
+@app.route('/api/templates/<int:template_id>', methods=['GET'])
+def get_template(template_id):
+    template = SurveyTemplate.query.get_or_404(template_id)
+    return jsonify({
+        "id": template.id,
+        "version_id": template.version_id,
+        "version_name": template.version.name,
+        "survey_code": template.survey_code,
+        "questions": template.questions,
+        "created_at": template.created_at
+    }), 200
+
+@app.route('/api/templates/<int:template_id>', methods=['PUT'])
+def update_template(template_id):
+    template = SurveyTemplate.query.get_or_404(template_id)
+    data = request.get_json() or {}
+    
+    # Only allow updating questions for now
+    if 'questions' in data:
+        template.questions = data['questions']
+        db.session.commit()
+        return jsonify({'updated': True}), 200
+    return jsonify({'error': 'No valid fields to update'}), 400
+
+@app.route('/api/templates/<int:template_id>', methods=['DELETE'])
+def delete_template(template_id):
+    template = SurveyTemplate.query.get_or_404(template_id)
+    db.session.delete(template)
+    db.session.commit()
+    return jsonify({'deleted': True}), 200
+
+@app.route('/api/templates/<int:template_id>/questions/<int:question_id>', methods=['DELETE'])
+def delete_template_question(template_id, question_id):
+    template = SurveyTemplate.query.get_or_404(template_id)
+    questions = template.questions or []
+    updated = [q for q in questions if q.get('id') != question_id]
+    template.questions = updated
+    db.session.commit()
+    return jsonify({'deleted': True}), 200
+
+# Survey Responses API Endpoints
+@app.route('/api/responses', methods=['GET'])
+def get_responses():
+    responses = SurveyResponse.query.all()
+    return jsonify([{
+        "id": r.id,
+        "template_id": r.template_id,
+        "user_id": r.user_id,
+        "status": r.status,
+        "created_at": r.created_at
+    } for r in responses]), 200
+
+@app.route('/api/templates/<int:template_id>/responses', methods=['POST'])
+def add_response(template_id):
+    data = request.get_json() or {}
+    if 'user_id' not in data or 'answers' not in data:
+        return jsonify({'error': 'Missing required fields'}), 400
+        
+    response = SurveyResponse(
+        template_id=template_id,
+        user_id=data['user_id'],
+        answers=data['answers'],
+        status=data.get('status', 'pending')
+    )
+    db.session.add(response)
+    db.session.commit()
+    return jsonify({
+        'id': response.id,
+        'status': response.status
+    }), 201
+
+@app.route('/api/responses/<int:response_id>', methods=['GET'])
+def get_response(response_id):
+    response = SurveyResponse.query.get_or_404(response_id)
+    return jsonify({
+        "id": response.id,
+        "template_id": response.template_id,
+        "user_id": response.user_id,
+        "answers": response.answers,
+        "status": response.status,
+        "created_at": response.created_at,
+        "updated_at": response.updated_at
+    }), 200
+
+@app.route('/api/responses/<int:response_id>', methods=['PUT'])
+def update_response(response_id):
+    response = SurveyResponse.query.get_or_404(response_id)
+    data = request.get_json() or {}
+    
+    for field in ['answers', 'status']:
+        if field in data:
+            setattr(response, field, data[field])
+    
+    db.session.commit()
+    return jsonify({'updated': True}), 200
+
+# Legacy Inventory endpoints for backward compatibility
+@app.route('/api/surveys/<int:survey_id>/versions', methods=['GET'])
+def get_survey_versions(survey_id):
+    # For backward compatibility
+    return jsonify([]), 200
+
+@app.route('/api/surveys/<int:survey_id>/versions', methods=['POST'])
+def add_survey_version(survey_id):
+    # For backward compatibility
+    return jsonify({'error': 'API deprecated, use template API instead'}), 400
+
+@app.route('/api/versions/<int:version_id>', methods=['DELETE'])
+def delete_survey_version(version_id):
+    # For backward compatibility
+    return jsonify({'error': 'API deprecated, use template API instead'}), 400
+
+@app.route('/api/versions/<int:version_id>/questions', methods=['GET'])
+def get_version_questions(version_id):
+    # For backward compatibility
+    return jsonify([]), 200
+
+@app.route('/api/versions/<int:version_id>/questions', methods=['POST'])
+def add_version_question(version_id):
+    # For backward compatibility
+    return jsonify({'error': 'API deprecated, use template API instead'}), 400
+
+@app.route('/api/questions/<int:question_id>', methods=['PUT'])
+def update_question(question_id):
+    # For backward compatibility
+    return jsonify({'error': 'API deprecated, use template API instead'}), 400
+
+@app.route('/api/questions/<int:question_id>', methods=['DELETE'])
+def delete_question(question_id):
+    # For backward compatibility
+    return jsonify({'error': 'API deprecated, use template API instead'}), 400
+
+# Organization API Endpoints
+@app.route('/api/organizations', methods=['GET'])
+def get_organizations():
+    organizations = Organization.query.all()
+    result = []
+    for org in organizations:
+        org_data = {
+            'id': org.id,
+            'name': org.name,
+            'type': org.type,
+            'continent': org.continent,
+            'region': org.region,
+            'province': org.province,
+            'city': org.city,
+            'town': org.town,
+            'denomination_id': org.denomination_id,
+            'accreditation_body_id': org.accreditation_body_id,
+            'umbrella_association_id': org.umbrella_association_id,
+            'primary_contact_id': org.primary_contact_id,
+            'secondary_contact_id': org.secondary_contact_id
+        }
+        result.append(org_data)
+    return jsonify(result)
+
+@app.route('/api/organizations/<int:org_id>', methods=['GET'])
+def get_organization(org_id):
+    org = Organization.query.get_or_404(org_id)
+    
+    # Get the appropriate detail based on organization type
+    details = {}
+    if org.type == 'school':
+        inst_detail = InstitutionDetail.query.get(org_id)
+        if inst_detail:
+            details = {
+                'town': inst_detail.town,
+                'highest_education': inst_detail.highest_education
+            }
+    elif org.type == 'church':
+        church_detail = ChurchDetail.query.get(org_id)
+        if church_detail:
+            details = {
+                'senior_pastor_name': church_detail.senior_pastor_name,
+                'pastor_email': church_detail.pastor_email,
+                'umbrella_association': church_detail.umbrella_association
+            }
+    else:  # 'other'
+        nonformal_detail = NonformalOrgDetail.query.get(org_id)
+        if nonformal_detail:
+            details = {
+                'org_lead': nonformal_detail.org_lead,
+                'lead_email': nonformal_detail.lead_email
+            }
+    
+    # Get primary and secondary contacts
+    primary_contact = User.query.get(org.primary_contact_id) if org.primary_contact_id else None
+    secondary_contact = User.query.get(org.secondary_contact_id) if org.secondary_contact_id else None
+    
+    result = {
+        'id': org.id,
+        'name': org.name,
+        'type': org.type,
+        'continent': org.continent,
+        'region': org.region,
+        'province': org.province,
+        'city': org.city,
+        'town': org.town,
+        'denomination_id': org.denomination_id,
+        'accreditation_body_id': org.accreditation_body_id,
+        'umbrella_association_id': org.umbrella_association_id,
+        'primary_contact_id': org.primary_contact_id,
+        'primary_contact': primary_contact.username if primary_contact else None,
+        'secondary_contact_id': org.secondary_contact_id,
+        'secondary_contact': secondary_contact.username if secondary_contact else None,
+        'details': details
+    }
+    
+    return jsonify(result)
+
+@app.route('/api/organizations', methods=['POST'])
+def add_organization():
+    data = request.get_json()
+    
+    # Create the organization
+    new_org = Organization(
+        name=data['name'],
+        type=data['type'],
+        continent=data.get('continent'),
+        region=data.get('region'),
+        province=data.get('province'),
+        city=data.get('city'),
+        town=data.get('town'),
+        denomination_id=data.get('denomination_id'),
+        accreditation_body_id=data.get('accreditation_body_id'),
+        umbrella_association_id=data.get('umbrella_association_id'),
+        primary_contact_id=data.get('primary_contact_id'),
+        secondary_contact_id=data.get('secondary_contact_id')
+    )
+    
+    db.session.add(new_org)
+    db.session.flush()  # Flush to get the ID without committing
+    
+    # Add type-specific details
+    if data['type'] == 'school':
+        details = data.get('details', {})
+        inst_detail = InstitutionDetail(
+            organization_id=new_org.id,
+            town=details.get('town'),
+            highest_education=details.get('highest_education')
+        )
+        db.session.add(inst_detail)
+    elif data['type'] == 'church':
+        details = data.get('details', {})
+        church_detail = ChurchDetail(
+            organization_id=new_org.id,
+            senior_pastor_name=details.get('senior_pastor_name'),
+            pastor_email=details.get('pastor_email'),
+            umbrella_association=details.get('umbrella_association')
+        )
+        db.session.add(church_detail)
+    else:  # 'other'
+        details = data.get('details', {})
+        nonformal_detail = NonformalOrgDetail(
+            organization_id=new_org.id,
+            org_lead=details.get('org_lead'),
+            lead_email=details.get('lead_email')
+        )
+        db.session.add(nonformal_detail)
+    
+    db.session.commit()
+    
+    return jsonify({
+        'message': 'Organization added successfully',
+        'id': new_org.id
+    }), 201
+
+@app.route('/api/organizations/<int:org_id>', methods=['PUT'])
+def update_organization(org_id):
+    org = Organization.query.get_or_404(org_id)
+    data = request.get_json()
+    
+    # Update organization fields
+    org.name = data.get('name', org.name)
+    org.type = data.get('type', org.type)
+    org.continent = data.get('continent', org.continent)
+    org.region = data.get('region', org.region)
+    org.province = data.get('province', org.province)
+    org.city = data.get('city', org.city)
+    org.town = data.get('town', org.town)
+    org.denomination_id = data.get('denomination_id', org.denomination_id)
+    org.accreditation_body_id = data.get('accreditation_body_id', org.accreditation_body_id)
+    org.umbrella_association_id = data.get('umbrella_association_id', org.umbrella_association_id)
+    org.primary_contact_id = data.get('primary_contact_id', org.primary_contact_id)
+    org.secondary_contact_id = data.get('secondary_contact_id', org.secondary_contact_id)
+    
+    # Update type-specific details
+    if 'details' in data:
+        details = data['details']
+        if org.type == 'school':
+            inst_detail = InstitutionDetail.query.get(org_id)
+            if not inst_detail:
+                inst_detail = InstitutionDetail(organization_id=org_id)
+                db.session.add(inst_detail)
+            inst_detail.town = details.get('town', inst_detail.town if inst_detail else None)
+            inst_detail.highest_education = details.get('highest_education', inst_detail.highest_education if inst_detail else None)
+        elif org.type == 'church':
+            church_detail = ChurchDetail.query.get(org_id)
+            if not church_detail:
+                church_detail = ChurchDetail(organization_id=org_id)
+                db.session.add(church_detail)
+            church_detail.senior_pastor_name = details.get('senior_pastor_name', church_detail.senior_pastor_name if church_detail else None)
+            church_detail.pastor_email = details.get('pastor_email', church_detail.pastor_email if church_detail else None)
+            church_detail.umbrella_association = details.get('umbrella_association', church_detail.umbrella_association if church_detail else None)
+        else:  # 'other'
+            nonformal_detail = NonformalOrgDetail.query.get(org_id)
+            if not nonformal_detail:
+                nonformal_detail = NonformalOrgDetail(organization_id=org_id)
+                db.session.add(nonformal_detail)
+            nonformal_detail.org_lead = details.get('org_lead', nonformal_detail.org_lead if nonformal_detail else None)
+            nonformal_detail.lead_email = details.get('lead_email', nonformal_detail.lead_email if nonformal_detail else None)
+    
+    db.session.commit()
+    
+    return jsonify({'message': 'Organization updated successfully'})
+
+@app.route('/api/organizations/<int:org_id>', methods=['DELETE'])
+def delete_organization(org_id):
+    org = Organization.query.get_or_404(org_id)
+    
+    # Delete type-specific details first
+    if org.type == 'school':
+        inst_detail = InstitutionDetail.query.get(org_id)
+        if inst_detail:
+            db.session.delete(inst_detail)
+    elif org.type == 'church':
+        church_detail = ChurchDetail.query.get(org_id)
+        if church_detail:
+            db.session.delete(church_detail)
+    else:  # 'other'
+        nonformal_detail = NonformalOrgDetail.query.get(org_id)
+        if nonformal_detail:
+            db.session.delete(nonformal_detail)
+    
+    # Delete organization
+    db.session.delete(org)
+    db.session.commit()
+    
+    return jsonify({'message': 'Organization deleted successfully'})
+
+@app.route('/api/organizations/<int:org_id>/users', methods=['GET'])
+def get_organization_users(org_id):
+    # Check if organization exists
+    org = Organization.query.get_or_404(org_id)
+    
+    # Get users directly associated with the organization
+    direct_users = User.query.filter_by(organization_id=org_id).all()
+    
+    # Get users associated through organization_user_roles
+    role_associations = OrganizationUserRole.query.filter_by(organization_id=org_id).all()
+    role_user_ids = [assoc.user_id for assoc in role_associations]
+    role_users = User.query.filter(User.id.in_(role_user_ids)).all()
+    
+    # Combine and deduplicate users
+    all_users = []
+    user_ids = set()
+    
+    for user in direct_users:
+        if user.id not in user_ids:
+            user_roles = [assoc.role.name for assoc in OrganizationUserRole.query.filter_by(user_id=user.id, organization_id=org_id).all()]
+            user_data = {
+                'id': user.id,
+                'username': user.username,
+                'email': user.email,
+                'role': user.role,
+                'roles': user_roles
+            }
+            all_users.append(user_data)
+            user_ids.add(user.id)
+    
+    for user in role_users:
+        if user.id not in user_ids:
+            user_roles = [assoc.role.name for assoc in OrganizationUserRole.query.filter_by(user_id=user.id, organization_id=org_id).all()]
+            user_data = {
+                'id': user.id,
+                'username': user.username,
+                'email': user.email,
+                'role': user.role,
+                'roles': user_roles
+            }
+            all_users.append(user_data)
+            user_ids.add(user.id)
+    
+    return jsonify(all_users)
+
+# File upload endpoint for organizations
+@app.route('/api/organizations/upload', methods=['POST'])
+def upload_organizations():
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file part'}), 400
+    
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({'error': 'No selected file'}), 400
+    
+    # Check file extension
+    if not (file.filename.endswith('.csv') or file.filename.endswith('.xlsx')):
+        return jsonify({'error': 'File must be CSV or XLSX format'}), 400
+    
+    # Save the file temporarily
+    filename = secure_filename(file.filename)
+    file_path = os.path.join('/tmp', filename)
+    file.save(file_path)
+    
+    # Process the file (placeholder - actual implementation would depend on file format)
+    try:
+        # This is a placeholder for the actual file processing logic
+        # In a real implementation, you would parse the CSV/XLSX and create organizations
+        return jsonify({
+            'message': 'File uploaded successfully',
+            'filename': filename,
+            'status': 'pending_processing'
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        # Clean up the temporary file
+        if os.path.exists(file_path):
+            os.remove(file_path)
+
+# User API Endpoints
+@app.route('/api/users', methods=['GET'])
+def get_all_users():
+    users = User.query.all()
+    result = []
+    for user in users:
+        user_roles = OrganizationUserRole.query.filter_by(user_id=user.id).all()
+        roles = [{'organization_id': ur.organization_id, 'role_id': ur.role_id, 'role_name': ur.role.name} for ur in user_roles]
+        
+        user_data = {
+            'id': user.id,
+            'username': user.username,
+            'email': user.email,
+            'role': user.role,
+            'firstname': user.firstname,
+            'lastname': user.lastname,
+            'organization_id': user.organization_id,
+            'roles': roles
+        }
+        result.append(user_data)
+    return jsonify(result)
+
+@app.route('/api/users/<int:user_id>', methods=['GET'])
+def get_user(user_id):
+    user = User.query.get_or_404(user_id)
+    user_roles = OrganizationUserRole.query.filter_by(user_id=user.id).all()
+    roles = [{'organization_id': ur.organization_id, 'role_id': ur.role_id, 'role_name': ur.role.name} for ur in user_roles]
+    
+    result = {
+        'id': user.id,
+        'username': user.username,
+        'email': user.email,
+        'role': user.role,
+        'firstname': user.firstname,
+        'lastname': user.lastname,
+        'organization_id': user.organization_id,
+        'roles': roles
+    }
+    return jsonify(result)
+
+@app.route('/api/users', methods=['POST'])
+def add_user():
+    data = request.get_json()
+    
+    # Create the user
+    new_user = User(
+        username=data['username'],
+        email=data['email'],
+        password=data['password'],  # In production, this should be hashed
+        role=data.get('role', 'user'),
+        firstname=data.get('firstname'),
+        lastname=data.get('lastname'),
+        organization_id=data.get('organization_id')
+    )
+    
+    db.session.add(new_user)
+    db.session.flush()  # Flush to get the ID without committing
+    
+    # Add user roles if provided
+    if 'roles' in data and isinstance(data['roles'], list):
+        for role_data in data['roles']:
+            org_id = role_data.get('organization_id')
+            role_id = role_data.get('role_id')
+            
+            if org_id and role_id:
+                user_role = OrganizationUserRole(
+                    user_id=new_user.id,
+                    organization_id=org_id,
+                    role_id=role_id
+                )
+                db.session.add(user_role)
+    
+    db.session.commit()
+    
+    return jsonify({
+        'message': 'User added successfully',
+        'id': new_user.id
+    }), 201
+
+@app.route('/api/users/<int:user_id>', methods=['PUT'])
+def update_user(user_id):
+    user = User.query.get_or_404(user_id)
+    data = request.get_json()
+    
+    # Update user fields
+    if 'username' in data:
+        user.username = data['username']
+    if 'email' in data:
+        user.email = data['email']
+    if 'password' in data:
+        user.password = data['password']  # In production, this should be hashed
+    if 'role' in data:
+        user.role = data['role']
+    if 'firstname' in data:
+        user.firstname = data['firstname']
+    if 'lastname' in data:
+        user.lastname = data['lastname']
+    if 'organization_id' in data:
+        user.organization_id = data['organization_id']
+    
+    # Update user roles if provided
+    if 'roles' in data and isinstance(data['roles'], list):
+        # Remove existing roles
+        OrganizationUserRole.query.filter_by(user_id=user_id).delete()
+        
+        # Add new roles
+        for role_data in data['roles']:
+            org_id = role_data.get('organization_id')
+            role_id = role_data.get('role_id')
+            
+            if org_id and role_id:
+                user_role = OrganizationUserRole(
+                    user_id=user_id,
+                    organization_id=org_id,
+                    role_id=role_id
+                )
+                db.session.add(user_role)
+    
+    db.session.commit()
+    
+    return jsonify({'message': 'User updated successfully'})
+
+@app.route('/api/users/<int:user_id>', methods=['DELETE'])
+def delete_user(user_id):
+    user = User.query.get_or_404(user_id)
+    
+    # Delete user roles first
+    OrganizationUserRole.query.filter_by(user_id=user_id).delete()
+    
+    # Delete user
+    db.session.delete(user)
+    db.session.commit()
+    
+    return jsonify({'message': 'User deleted successfully'})
+
+# File upload endpoint for users
+@app.route('/api/users/upload', methods=['POST'])
+def upload_users():
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file part'}), 400
+    
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({'error': 'No selected file'}), 400
+    
+    # Check file extension
+    if not (file.filename.endswith('.csv') or file.filename.endswith('.xlsx')):
+        return jsonify({'error': 'File must be CSV or XLSX format'}), 400
+    
+    # Save the file temporarily
+    filename = secure_filename(file.filename)
+    file_path = os.path.join('/tmp', filename)
+    file.save(file_path)
+    
+    # Process the file (placeholder - actual implementation would depend on file format)
+    try:
+        # This is a placeholder for the actual file processing logic
+        # In a real implementation, you would parse the CSV/XLSX and create users
+        return jsonify({
+            'message': 'File uploaded successfully',
+            'filename': filename,
+            'status': 'pending_processing'
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        # Clean up the temporary file
+        if os.path.exists(file_path):
+            os.remove(file_path)
+
+# Role API Endpoints
+@app.route('/api/roles', methods=['GET'])
+def get_roles():
+    roles = Role.query.all()
+    result = [{
+        'id': role.id,
+        'name': role.name,
+        'description': role.description
+    } for role in roles]
+    return jsonify(result)
+
+# Denomination API Endpoints
+@app.route('/api/denominations', methods=['GET'])
+def get_denominations():
+    denominations = Denomination.query.all()
+    result = [{
+        'id': denom.id,
+        'name': denom.name,
+        'description': denom.description
+    } for denom in denominations]
+    return jsonify(result)
+
+# Accreditation Bodies API Endpoints
+@app.route('/api/accreditation-bodies', methods=['GET'])
+def get_accreditation_bodies():
+    bodies = AccreditationBody.query.all()
+    result = [{
+        'id': body.id,
+        'name': body.name,
+        'description': body.description
+    } for body in bodies]
+    return jsonify(result)
+
+# Umbrella Associations API Endpoints
+@app.route('/api/umbrella-associations', methods=['GET'])
+def get_umbrella_associations():
+    associations = UmbrellaAssociation.query.all()
+    result = [{
+        'id': assoc.id,
+        'name': assoc.name,
+        'description': assoc.description
+    } for assoc in associations]
+    return jsonify(result)
+
 # To initialize the database tables (run once)
 @app.cli.command('init-db')
 def init_db():
@@ -554,7 +1452,10 @@ def init_db():
     print("Database tables created successfully!")
 
 if __name__ == '__main__':
-    with app.app_context():
-        # Create tables if they don't exist
-        db.create_all()
+    #with app.app_context():
+        # Drop and recreate tables to ensure schema is up-to-date
+        #print("Recreating database tables to ensure schema is up-to-date...")
+        #db.drop_all()  # This will drop all tables - be careful in production!
+        #db.create_all()  # This will create all tables based on your models
+        #print("Database tables created successfully!")
     app.run(debug=True)
