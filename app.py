@@ -180,6 +180,7 @@ class Question(db.Model):
     template_id = db.Column(db.Integer, db.ForeignKey('survey_templates.id'), nullable=False)
     question_type_id = db.Column(db.Integer, db.ForeignKey('question_types.id'), nullable=False)
     question_text = db.Column(db.Text, nullable=False)
+    section = db.Column(db.String(100), nullable=True)  # New column for section
     order = db.Column(db.Integer, nullable=False)
     is_required = db.Column(db.Boolean, default=False)
     config = db.Column(JSON, nullable=True)
