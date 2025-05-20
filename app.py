@@ -51,18 +51,8 @@ def create_tables():
 class Organization(db.Model):
     __tablename__ = 'organizations'
     id = db.Column(db.Integer, primary_key=True)
-    denomination_id = db.Column(db.Integer, db.ForeignKey('denominations.id'), nullable=True)
-    accreditation_body_id = db.Column(db.Integer, db.ForeignKey('accreditation_bodies.id'), nullable=True)
-    umbrella_association_id = db.Column(db.Integer, db.ForeignKey('umbrella_associations.id'), nullable=True)
-    primary_contact_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
-    secondary_contact_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     name = db.Column(db.String(100), nullable=False)
     type = db.Column(db.Enum('church', 'school', 'other'), nullable=False)
-    continent = db.Column(db.String(50), nullable=True)
-    region = db.Column(db.String(50), nullable=True)
-    province = db.Column(db.String(50), nullable=True)
-    city = db.Column(db.String(50), nullable=True)
-    town = db.Column(db.String(50), nullable=True)
     created_at = db.Column(db.DateTime, server_default=db.func.current_timestamp())
     
     def __repr__(self):
@@ -204,96 +194,6 @@ class QuestionOption(db.Model):
 
     def __repr__(self):
         return f'<QuestionOption q_id={self.question_id} option={self.option_text}>'
-
-# Define additional models for the new requirements
-class Denomination(db.Model):
-    __tablename__ = 'denominations'
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(100), nullable=False)
-    description = db.Column(db.Text, nullable=True)
-    
-    def __repr__(self):
-        return f'<Denomination {self.name}>'
-
-class AccreditationBody(db.Model):
-    __tablename__ = 'accreditation_bodies'
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(100), nullable=False)
-    description = db.Column(db.Text, nullable=True)
-    
-    def __repr__(self):
-        return f'<AccreditationBody {self.name}>'
-
-class UmbrellaAssociation(db.Model):
-    __tablename__ = 'umbrella_associations'
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(100), nullable=False)
-    description = db.Column(db.Text, nullable=True)
-    
-    def __repr__(self):
-        return f'<UmbrellaAssociation {self.name}>'
-
-class InstitutionDetail(db.Model):
-    __tablename__ = 'institution_details'
-    organization_id = db.Column(db.Integer, db.ForeignKey('organizations.id'), primary_key=True)
-    town = db.Column(db.String(100), nullable=True)
-    highest_education = db.Column(db.String(100), nullable=True)
-    
-    # Relationship
-    organization = db.relationship('Organization', backref=db.backref('institution_detail', uselist=False, lazy=True))
-    
-    def __repr__(self):
-        return f'<InstitutionDetail for org_id={self.organization_id}>'
-
-class ChurchDetail(db.Model):
-    __tablename__ = 'church_details'
-    organization_id = db.Column(db.Integer, db.ForeignKey('organizations.id'), primary_key=True)
-    senior_pastor_name = db.Column(db.String(100), nullable=True)
-    pastor_email = db.Column(db.String(100), nullable=True)
-    umbrella_association = db.Column(db.String(100), nullable=True)
-    
-    # Relationship
-    organization = db.relationship('Organization', backref=db.backref('church_detail', uselist=False, lazy=True))
-    
-    def __repr__(self):
-        return f'<ChurchDetail for org_id={self.organization_id}>'
-
-class NonformalOrgDetail(db.Model):
-    __tablename__ = 'nonformal_org_details'
-    organization_id = db.Column(db.Integer, db.ForeignKey('organizations.id'), primary_key=True)
-    org_lead = db.Column(db.String(100), nullable=True)
-    lead_email = db.Column(db.String(100), nullable=True)
-    
-    # Relationship
-    organization = db.relationship('Organization', backref=db.backref('nonformal_detail', uselist=False, lazy=True))
-    
-    def __repr__(self):
-        return f'<NonformalOrgDetail for org_id={self.organization_id}>'
-
-class Role(db.Model):
-    __tablename__ = 'roles'
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(50), nullable=False, unique=True)
-    description = db.Column(db.Text, nullable=True)
-    
-    def __repr__(self):
-        return f'<Role {self.name}>'
-
-class OrganizationUserRole(db.Model):
-    __tablename__ = 'organization_user_roles'
-    id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
-    organization_id = db.Column(db.Integer, db.ForeignKey('organizations.id'), nullable=False)
-    role_id = db.Column(db.Integer, db.ForeignKey('roles.id'), nullable=False)
-    assigned_at = db.Column(db.DateTime, default=datetime.utcnow)
-    
-    # Relationships
-    user = db.relationship('User', backref=db.backref('organization_roles', lazy=True))
-    organization = db.relationship('Organization', backref=db.backref('user_roles', lazy=True))
-    role = db.relationship('Role', backref=db.backref('assignments', lazy=True))
-    
-    def __repr__(self):
-        return f'<OrganizationUserRole user_id={self.user_id}, org_id={self.organization_id}, role_id={self.role_id}>'
 
 # Routes
 
@@ -954,16 +854,6 @@ def get_organizations():
             'id': org.id,
             'name': org.name,
             'type': org.type,
-            'continent': org.continent,
-            'region': org.region,
-            'province': org.province,
-            'city': org.city,
-            'town': org.town,
-            'denomination_id': org.denomination_id,
-            'accreditation_body_id': org.accreditation_body_id,
-            'umbrella_association_id': org.umbrella_association_id,
-            'primary_contact_id': org.primary_contact_id,
-            'secondary_contact_id': org.secondary_contact_id
         }
         result.append(org_data)
     return jsonify(result)
@@ -971,107 +861,24 @@ def get_organizations():
 @app.route('/api/organizations/<int:org_id>', methods=['GET'])
 def get_organization(org_id):
     org = Organization.query.get_or_404(org_id)
-    
-    # Get the appropriate detail based on organization type
-    details = {}
-    if org.type == 'school':
-        inst_detail = InstitutionDetail.query.get(org_id)
-        if inst_detail:
-            details = {
-                'town': inst_detail.town,
-                'highest_education': inst_detail.highest_education
-            }
-    elif org.type == 'church':
-        church_detail = ChurchDetail.query.get(org_id)
-        if church_detail:
-            details = {
-                'senior_pastor_name': church_detail.senior_pastor_name,
-                'pastor_email': church_detail.pastor_email,
-                'umbrella_association': church_detail.umbrella_association
-            }
-    else:  # 'other'
-        nonformal_detail = NonformalOrgDetail.query.get(org_id)
-        if nonformal_detail:
-            details = {
-                'org_lead': nonformal_detail.org_lead,
-                'lead_email': nonformal_detail.lead_email
-            }
-    
-    # Get primary and secondary contacts
-    primary_contact = User.query.get(org.primary_contact_id) if org.primary_contact_id else None
-    secondary_contact = User.query.get(org.secondary_contact_id) if org.secondary_contact_id else None
-    
     result = {
         'id': org.id,
         'name': org.name,
-        'type': org.type,
-        'continent': org.continent,
-        'region': org.region,
-        'province': org.province,
-        'city': org.city,
-        'town': org.town,
-        'denomination_id': org.denomination_id,
-        'accreditation_body_id': org.accreditation_body_id,
-        'umbrella_association_id': org.umbrella_association_id,
-        'primary_contact_id': org.primary_contact_id,
-        'primary_contact': primary_contact.username if primary_contact else None,
-        'secondary_contact_id': org.secondary_contact_id,
-        'secondary_contact': secondary_contact.username if secondary_contact else None,
-        'details': details
+        'type': org.type
     }
-    
     return jsonify(result)
 
 @app.route('/api/organizations', methods=['POST'])
 def add_organization():
     data = request.get_json()
     
-    # Create the organization
+    # Create the organization without type-specific details
     new_org = Organization(
         name=data['name'],
-        type=data['type'],
-        continent=data.get('continent'),
-        region=data.get('region'),
-        province=data.get('province'),
-        city=data.get('city'),
-        town=data.get('town'),
-        denomination_id=data.get('denomination_id'),
-        accreditation_body_id=data.get('accreditation_body_id'),
-        umbrella_association_id=data.get('umbrella_association_id'),
-        primary_contact_id=data.get('primary_contact_id'),
-        secondary_contact_id=data.get('secondary_contact_id')
+        type=data['type']
     )
     
     db.session.add(new_org)
-    db.session.flush()  # Flush to get the ID without committing
-    
-    # Add type-specific details
-    if data['type'] == 'school':
-        details = data.get('details', {})
-        inst_detail = InstitutionDetail(
-            organization_id=new_org.id,
-            town=details.get('town'),
-            highest_education=details.get('highest_education')
-        )
-        db.session.add(inst_detail)
-    elif data['type'] == 'church':
-        details = data.get('details', {})
-        church_detail = ChurchDetail(
-            organization_id=new_org.id,
-            senior_pastor_name=details.get('senior_pastor_name'),
-            pastor_email=details.get('pastor_email'),
-            umbrella_association=details.get('umbrella_association')
-        )
-        db.session.add(church_detail)
-    else:  # 'other'
-        details = data.get('details', {})
-        nonformal_detail = NonformalOrgDetail(
-            organization_id=new_org.id,
-            org_lead=details.get('org_lead'),
-            lead_email=details.get('lead_email')
-        )
-        db.session.add(nonformal_detail)
-    
     db.session.commit()
     
     return jsonify({
@@ -1084,45 +891,9 @@ def update_organization(org_id):
     org = Organization.query.get_or_404(org_id)
     data = request.get_json()
     
-    # Update organization fields
+    # Update basic organization fields only
     org.name = data.get('name', org.name)
     org.type = data.get('type', org.type)
-    org.continent = data.get('continent', org.continent)
-    org.region = data.get('region', org.region)
-    org.province = data.get('province', org.province)
-    org.city = data.get('city', org.city)
-    org.town = data.get('town', org.town)
-    org.denomination_id = data.get('denomination_id', org.denomination_id)
-    org.accreditation_body_id = data.get('accreditation_body_id', org.accreditation_body_id)
-    org.umbrella_association_id = data.get('umbrella_association_id', org.umbrella_association_id)
-    org.primary_contact_id = data.get('primary_contact_id', org.primary_contact_id)
-    org.secondary_contact_id = data.get('secondary_contact_id', org.secondary_contact_id)
-    
-    # Update type-specific details
-    if 'details' in data:
-        details = data['details']
-        if org.type == 'school':
-            inst_detail = InstitutionDetail.query.get(org_id)
-            if not inst_detail:
-                inst_detail = InstitutionDetail(organization_id=org_id)
-                db.session.add(inst_detail)
-            inst_detail.town = details.get('town', inst_detail.town if inst_detail else None)
-            inst_detail.highest_education = details.get('highest_education', inst_detail.highest_education if inst_detail else None)
-        elif org.type == 'church':
-            church_detail = ChurchDetail.query.get(org_id)
-            if not church_detail:
-                church_detail = ChurchDetail(organization_id=org_id)
-                db.session.add(church_detail)
-            church_detail.senior_pastor_name = details.get('senior_pastor_name', church_detail.senior_pastor_name if church_detail else None)
-            church_detail.pastor_email = details.get('pastor_email', church_detail.pastor_email if church_detail else None)
-            church_detail.umbrella_association = details.get('umbrella_association', church_detail.umbrella_association if church_detail else None)
-        else:  # 'other'
-            nonformal_detail = NonformalOrgDetail.query.get(org_id)
-            if not nonformal_detail:
-                nonformal_detail = NonformalOrgDetail(organization_id=org_id)
-                db.session.add(nonformal_detail)
-            nonformal_detail.org_lead = details.get('org_lead', nonformal_detail.org_lead if nonformal_detail else None)
-            nonformal_detail.lead_email = details.get('lead_email', nonformal_detail.lead_email if nonformal_detail else None)
     
     db.session.commit()
     
@@ -1131,20 +902,6 @@ def update_organization(org_id):
 @app.route('/api/organizations/<int:org_id>', methods=['DELETE'])
 def delete_organization(org_id):
     org = Organization.query.get_or_404(org_id)
-    
-    # Delete type-specific details first
-    if org.type == 'school':
-        inst_detail = InstitutionDetail.query.get(org_id)
-        if inst_detail:
-            db.session.delete(inst_detail)
-    elif org.type == 'church':
-        church_detail = ChurchDetail.query.get(org_id)
-        if church_detail:
-            db.session.delete(church_detail)
-    else:  # 'other'
-        nonformal_detail = NonformalOrgDetail.query.get(org_id)
-        if nonformal_detail:
-            db.session.delete(nonformal_detail)
     
     # Delete organization
     db.session.delete(org)
@@ -1158,44 +915,21 @@ def get_organization_users(org_id):
     org = Organization.query.get_or_404(org_id)
     
     # Get users directly associated with the organization
-    direct_users = User.query.filter_by(organization_id=org_id).all()
+    users = User.query.filter_by(organization_id=org_id).all()
     
-    # Get users associated through organization_user_roles
-    role_associations = OrganizationUserRole.query.filter_by(organization_id=org_id).all()
-    role_user_ids = [assoc.user_id for assoc in role_associations]
-    role_users = User.query.filter(User.id.in_(role_user_ids)).all()
+    result = []
+    for user in users:
+        user_data = {
+            'id': user.id,
+            'username': user.username,
+            'email': user.email,
+            'role': user.role,
+            'firstname': user.firstname,
+            'lastname': user.lastname
+        }
+        result.append(user_data)
     
-    # Combine and deduplicate users
-    all_users = []
-    user_ids = set()
-    
-    for user in direct_users:
-        if user.id not in user_ids:
-            user_roles = [assoc.role.name for assoc in OrganizationUserRole.query.filter_by(user_id=user.id, organization_id=org_id).all()]
-            user_data = {
-                'id': user.id,
-                'username': user.username,
-                'email': user.email,
-                'role': user.role,
-                'roles': user_roles
-            }
-            all_users.append(user_data)
-            user_ids.add(user.id)
-    
-    for user in role_users:
-        if user.id not in user_ids:
-            user_roles = [assoc.role.name for assoc in OrganizationUserRole.query.filter_by(user_id=user.id, organization_id=org_id).all()]
-            user_data = {
-                'id': user.id,
-                'username': user.username,
-                'email': user.email,
-                'role': user.role,
-                'roles': user_roles
-            }
-            all_users.append(user_data)
-            user_ids.add(user.id)
-    
-    return jsonify(all_users)
+    return jsonify(result)
 
 # File upload endpoint for organizations
 @app.route('/api/organizations/upload', methods=['POST'])
@@ -1238,8 +972,8 @@ def get_all_users():
     users = User.query.all()
     result = []
     for user in users:
-        user_roles = OrganizationUserRole.query.filter_by(user_id=user.id).all()
-        roles = [{'organization_id': ur.organization_id, 'role_id': ur.role_id, 'role_name': ur.role.name} for ur in user_roles]
+        # Note: OrganizationUserRole has been removed
+        # No roles will be included in the response
         
         user_data = {
             'id': user.id,
@@ -1248,8 +982,7 @@ def get_all_users():
             'role': user.role,
             'firstname': user.firstname,
             'lastname': user.lastname,
-            'organization_id': user.organization_id,
-            'roles': roles
+            'organization_id': user.organization_id
         }
         result.append(user_data)
     return jsonify(result)
@@ -1257,8 +990,9 @@ def get_all_users():
 @app.route('/api/users/<int:user_id>', methods=['GET'])
 def get_user(user_id):
     user = User.query.get_or_404(user_id)
-    user_roles = OrganizationUserRole.query.filter_by(user_id=user.id).all()
-    roles = [{'organization_id': ur.organization_id, 'role_id': ur.role_id, 'role_name': ur.role.name} for ur in user_roles]
+    
+    # Note: OrganizationUserRole has been removed
+    # No roles will be included in the response
     
     result = {
         'id': user.id,
@@ -1267,8 +1001,7 @@ def get_user(user_id):
         'role': user.role,
         'firstname': user.firstname,
         'lastname': user.lastname,
-        'organization_id': user.organization_id,
-        'roles': roles
+        'organization_id': user.organization_id
     }
     return jsonify(result)
 
@@ -1288,23 +1021,10 @@ def add_user():
     )
     
     db.session.add(new_user)
-    db.session.flush()  # Flush to get the ID without committing
-    
-    # Add user roles if provided
-    if 'roles' in data and isinstance(data['roles'], list):
-        for role_data in data['roles']:
-            org_id = role_data.get('organization_id')
-            role_id = role_data.get('role_id')
-            
-            if org_id and role_id:
-                user_role = OrganizationUserRole(
-                    user_id=new_user.id,
-                    organization_id=org_id,
-                    role_id=role_id
-                )
-                db.session.add(user_role)
-    
     db.session.commit()
+    
+    # Note: OrganizationUserRole has been removed
+    # No role assignments will be performed
     
     return jsonify({
         'message': 'User added successfully',
@@ -1332,23 +1052,8 @@ def update_user(user_id):
     if 'organization_id' in data:
         user.organization_id = data['organization_id']
     
-    # Update user roles if provided
-    if 'roles' in data and isinstance(data['roles'], list):
-        # Remove existing roles
-        OrganizationUserRole.query.filter_by(user_id=user_id).delete()
-        
-        # Add new roles
-        for role_data in data['roles']:
-            org_id = role_data.get('organization_id')
-            role_id = role_data.get('role_id')
-            
-            if org_id and role_id:
-                user_role = OrganizationUserRole(
-                    user_id=user_id,
-                    organization_id=org_id,
-                    role_id=role_id
-                )
-                db.session.add(user_role)
+    # Note: OrganizationUserRole has been removed
+    # No role management operations will be performed
     
     db.session.commit()
     
@@ -1358,8 +1063,8 @@ def update_user(user_id):
 def delete_user(user_id):
     user = User.query.get_or_404(user_id)
     
-    # Delete user roles first
-    OrganizationUserRole.query.filter_by(user_id=user_id).delete()
+    # Note: OrganizationUserRole has been removed
+    # No need to delete related roles
     
     # Delete user
     db.session.delete(user)
@@ -1402,55 +1107,69 @@ def upload_users():
         if os.path.exists(file_path):
             os.remove(file_path)
 
-# Role API Endpoints
-@app.route('/api/roles', methods=['GET'])
-def get_roles():
-    roles = Role.query.all()
-    result = [{
-        'id': role.id,
-        'name': role.name,
-        'description': role.description
-    } for role in roles]
-    return jsonify(result)
-
-# Denomination API Endpoints
-@app.route('/api/denominations', methods=['GET'])
-def get_denominations():
-    denominations = Denomination.query.all()
-    result = [{
-        'id': denom.id,
-        'name': denom.name,
-        'description': denom.description
-    } for denom in denominations]
-    return jsonify(result)
-
-# Accreditation Bodies API Endpoints
-@app.route('/api/accreditation-bodies', methods=['GET'])
-def get_accreditation_bodies():
-    bodies = AccreditationBody.query.all()
-    result = [{
-        'id': body.id,
-        'name': body.name,
-        'description': body.description
-    } for body in bodies]
-    return jsonify(result)
-
-# Umbrella Associations API Endpoints
-@app.route('/api/umbrella-associations', methods=['GET'])
-def get_umbrella_associations():
-    associations = UmbrellaAssociation.query.all()
-    result = [{
-        'id': assoc.id,
-        'name': assoc.name,
-        'description': assoc.description
-    } for assoc in associations]
-    return jsonify(result)
-
 # To initialize the database tables (run once)
 @app.cli.command('init-db')
 def init_db():
     db.create_all()
     print("Database tables created successfully!")
+
+@app.route('/api/users/role/user', methods=['GET'])
+def get_users_with_role_user():
+    users = User.query.filter_by(role='user').all()
+    result = []
+    
+    for user in users:
+        user_data = {
+            'id': user.id,
+            'username': user.username,
+            'email': user.email,
+            'firstname': user.firstname,
+            'lastname': user.lastname,
+            'organization': {
+                'id': user.organization.id,
+                'name': user.organization.name,
+                'type': user.organization.type
+            } if user.organization else None
+        }
+        result.append(user_data)
+    
+    return jsonify(result)
+
+# Add stub API endpoints for removed models to keep frontend working
+# These will return empty data until the models are implemented
+
+# Role API Endpoints (Stub)
+@app.route('/api/roles', methods=['GET'])
+def get_roles():
+    # Return empty list since the Role model is not yet implemented
+    return jsonify([])
+
+@app.route('/api/roles', methods=['POST'])
+def add_role():
+    # Simulate adding a role (will be implemented later)
+    return jsonify({
+        'id': 1,  # Dummy ID
+        'name': request.json.get('name', ''),
+        'description': request.json.get('description', '')
+    }), 201
+
+# Denomination API Endpoints (Stub)
+@app.route('/api/denominations', methods=['GET'])
+def get_denominations():
+    # Return empty list since the Denomination model is not yet implemented
+    return jsonify([])
+
+# Accreditation Bodies API Endpoints (Stub)
+@app.route('/api/accreditation-bodies', methods=['GET'])
+def get_accreditation_bodies():
+    # Return empty list since the AccreditationBody model is not yet implemented
+    return jsonify([])
+
+# Umbrella Associations API Endpoints (Stub)
+@app.route('/api/umbrella-associations', methods=['GET'])
+def get_umbrella_associations():
+    # Return empty list since the UmbrellaAssociation model is not yet implemented
+    return jsonify([])
 
 if __name__ == '__main__':
     #with app.app_context():
