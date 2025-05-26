@@ -13,6 +13,11 @@ from sqlalchemy import event
 from uuid import uuid4
 import os
 from werkzeug.utils import secure_filename
+from dotenv import load_dotenv
+from sqlalchemy.exc import OperationalError
+from sqlalchemy import create_engine
+
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
@@ -24,11 +29,61 @@ app = Flask(__name__)
 # Configure CORS to allow requests from the React frontend
 CORS(
     app,
-    resources={r"/api/*": {"origins": "http://localhost:3000"}},
+    resources={
+        r"/api/*": {
+            "origins": [
+                "http://localhost:3000",    # for local dev
+                "http://3.142.171.30"       # your EC2-served frontend
+            ]
+        }
+    },
     supports_credentials=True,
     allow_headers=["Content-Type", "Authorization"]
 )
 
+# 1) Env-based settings
+env_user     = os.getenv("DB_USER")
+env_password = os.getenv("DB_PASSWORD")
+env_host     = os.getenv("DB_HOST")
+env_port     = os.getenv("DB_PORT", "3306")
+env_name     = os.getenv("DB_NAME")
+
+# 2) Attempt to build a URL from env
+db_url = None
+if env_user and env_password and env_host and env_name:
+    db_url_candidate = (
+        f"mysql+pymysql://{env_user}:{env_password}"
+        f"@{env_host}:{env_port}/{env_name}"
+    )
+    # 3) Test it
+    try:
+        engine = create_engine(db_url_candidate)
+        conn = engine.connect()
+        conn.close()
+        db_url = db_url_candidate
+        logger.info("✅ Connected using .env settings")
+    except OperationalError as e:
+        logger.warning(f"⚠️  .env DB connection failed: {e}")
+
+# 4) Fallback to local_* variables if env failed
+if not db_url:
+    # Local defaults
+    local_db_user     = 'root'
+    local_db_password = 'jaideep'
+    local_db_host     = 'localhost'
+    local_db_port     = '3306'
+    local_db_name     = 'boskopartnersdb'
+
+    fallback_url = (
+        f"mysql+pymysql://{local_db_user}:{local_db_password}"
+        f"@{local_db_host}:{local_db_port}/{local_db_name}"
+    )
+    app.config["SQLALCHEMY_DATABASE_URI"] = fallback_url
+    logger.info("✅ Using local database settings")
+else:
+    app.config["SQLALCHEMY_DATABASE_URI"] = db_url
+
+"""
 # Database configuration
 DB_USER = 'root'
 DB_PASSWORD = 'jaideep'
@@ -37,6 +92,7 @@ DB_NAME = 'boskopartnersdb'
 
 # Configure SQLAlchemy
 app.config['SQLALCHEMY_DATABASE_URI'] = f'mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}/{DB_NAME}'
+"""
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['SQLALCHEMY_ECHO'] = True  # Log all SQL queries
 db = SQLAlchemy(app)
