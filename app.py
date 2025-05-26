@@ -731,8 +731,17 @@ def update_template(template_id):
     
     # Only allow updating questions for now
     if 'questions' in data:
+        logger.info(f"Updating questions for template {template_id}")
+        logger.debug(f"New questions data: {data['questions']}")
+        
+        # Validate that all questions have required fields
+        for question in data['questions']:
+            if not all(key in question for key in ['id', 'question_text', 'question_type_id', 'order']):
+                return jsonify({'error': 'Invalid question data: missing required fields'}), 400
+        
         template.questions = data['questions']
         db.session.commit()
+        logger.info(f"Successfully updated questions for template {template_id}")
         return jsonify({'updated': True}), 200
     return jsonify({'error': 'No valid fields to update'}), 400
 
