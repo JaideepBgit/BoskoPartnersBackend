@@ -34,6 +34,7 @@ CORS(
             "origins": [
                 "http://localhost:3000",    # for local dev
                 "http://3.142.171.30"       # your EC2-served frontend
+                "http://18.222.89.189"
             ]
         }
     },
