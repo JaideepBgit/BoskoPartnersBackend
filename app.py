@@ -31,7 +31,7 @@ CORS(
 
 # Database configuration
 DB_USER = 'root'
-DB_PASSWORD = 'jaideep'
+DB_PASSWORD = 'rootroot'
 DB_HOST = 'localhost'
 DB_NAME = 'boskopartnersdb'
 
@@ -160,6 +160,12 @@ class QuestionType(db.Model):
     __tablename__ = 'question_types'
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(50), nullable=False, unique=True)
+    display_name = db.Column(db.String(100), nullable=False)
+    category = db.Column(db.String(50), nullable=False)
+    description = db.Column(db.Text, nullable=True)
+    config_schema = db.Column(JSON, nullable=True)
+    is_active = db.Column(db.Boolean, default=True)
+    created_at = db.Column(db.DateTime, server_default=db.func.current_timestamp())
     
     def __repr__(self):
         return f'<QuestionType {self.name}>'
@@ -729,7 +735,15 @@ def update_template(template_id):
     template = SurveyTemplate.query.get_or_404(template_id)
     data = request.get_json() or {}
     
-    # Only allow updating questions for now
+    updated = False
+    
+    # Allow updating survey_code (template name)
+    if 'survey_code' in data:
+        logger.info(f"Updating survey_code for template {template_id} to: {data['survey_code']}")
+        template.survey_code = data['survey_code']
+        updated = True
+    
+    # Allow updating questions
     if 'questions' in data:
         logger.info(f"Updating questions for template {template_id}")
         logger.debug(f"New questions data: {data['questions']}")
@@ -740,9 +754,13 @@ def update_template(template_id):
                 return jsonify({'error': 'Invalid question data: missing required fields'}), 400
         
         template.questions = data['questions']
+        updated = True
+    
+    if updated:
         db.session.commit()
-        logger.info(f"Successfully updated questions for template {template_id}")
+        logger.info(f"Successfully updated template {template_id}")
         return jsonify({'updated': True}), 200
+    
     return jsonify({'error': 'No valid fields to update'}), 400
 
 @app.route('/api/templates/<int:template_id>', methods=['DELETE'])
@@ -1179,6 +1197,220 @@ def get_accreditation_bodies():
 def get_umbrella_associations():
     # Return empty list since the UmbrellaAssociation model is not yet implemented
     return jsonify([])
+
+# Question Types API Endpoints
+@app.route('/api/question-types', methods=['GET'])
+def get_question_types():
+    """Get all question types, optionally filtered by category"""
+    category = request.args.get('category')
+    
+    query = QuestionType.query.filter_by(is_active=True)
+    if category:
+        query = query.filter_by(category=category)
+    
+    question_types = query.all()
+    
+    return jsonify([{
+        'id': qt.id,
+        'name': qt.name,
+        'display_name': qt.display_name,
+        'category': qt.category,
+        'description': qt.description,
+        'config_schema': qt.config_schema
+    } for qt in question_types]), 200
+
+@app.route('/api/question-types/<int:type_id>', methods=['GET'])
+def get_question_type(type_id):
+    """Get a specific question type by ID"""
+    question_type = QuestionType.query.get_or_404(type_id)
+    
+    return jsonify({
+        'id': question_type.id,
+        'name': question_type.name,
+        'display_name': question_type.display_name,
+        'category': question_type.category,
+        'description': question_type.description,
+        'config_schema': question_type.config_schema
+    }), 200
+
+@app.route('/api/question-types/categories', methods=['GET'])
+def get_question_type_categories():
+    """Get all unique question type categories"""
+    categories = db.session.query(QuestionType.category).filter_by(is_active=True).distinct().all()
+    return jsonify([cat[0] for cat in categories]), 200
+
+@app.route('/api/question-types/initialize', methods=['POST'])
+def initialize_question_types():
+    """Initialize the database with all question types from the configuration"""
+    try:
+        # Question types data matching the frontend configuration
+        question_types_data = [
+            # Standard Content Questions
+            {
+                'id': 1, 'name': 'text_graphic', 'display_name': 'Text / Graphic',
+                'category': 'Standard Content', 'description': 'Display text, images, or other media content',
+                'config_schema': {'content_type': 'text', 'content': '', 'alignment': 'left'}
+            },
+            {
+                'id': 2, 'name': 'multiple_choice', 'display_name': 'Multiple Choice',
+                'category': 'Standard Content', 'description': 'Single or multiple selection from predefined options',
+                'config_schema': {'selection_type': 'single', 'options': [], 'randomize_options': False, 'allow_other': False, 'other_text': 'Other (please specify)'}
+            },
+            {
+                'id': 3, 'name': 'matrix_table', 'display_name': 'Matrix Table',
+                'category': 'Standard Content', 'description': 'Grid of questions with same answer choices',
+                'config_schema': {'statements': [], 'scale_points': [], 'force_response': False, 'randomize_statements': False}
+            },
+            {
+                'id': 4, 'name': 'text_entry', 'display_name': 'Text Entry',
+                'category': 'Standard Content', 'description': 'Open-ended text responses',
+                'config_schema': {'input_type': 'single_line', 'validation': None, 'max_length': None, 'placeholder': ''}
+            },
+            {
+                'id': 5, 'name': 'form_field', 'display_name': 'Form Field',
+                'category': 'Standard Content', 'description': 'Structured form inputs (name, address, etc.)',
+                'config_schema': {'field_type': 'name', 'required_fields': [], 'format': 'standard'}
+            },
+            {
+                'id': 6, 'name': 'slider', 'display_name': 'Slider',
+                'category': 'Standard Content', 'description': 'Numeric input using a slider interface',
+                'config_schema': {'min_value': 0, 'max_value': 100, 'step': 1, 'default_value': None, 'labels': {'min_label': '', 'max_label': ''}}
+            },
+            {
+                'id': 7, 'name': 'rank_order', 'display_name': 'Rank Order',
+                'category': 'Standard Content', 'description': 'Drag and drop ranking of items',
+                'config_schema': {'items': [], 'force_ranking': True, 'randomize_items': False}
+            },
+            {
+                'id': 8, 'name': 'side_by_side', 'display_name': 'Side by Side',
+                'category': 'Standard Content', 'description': 'Multiple questions displayed horizontally',
+                'config_schema': {'questions': [], 'layout': 'equal_width'}
+            },
+            {
+                'id': 9, 'name': 'autocomplete', 'display_name': 'Autocomplete',
+                'category': 'Standard Content', 'description': 'Text input with autocomplete suggestions',
+                'config_schema': {'suggestions': [], 'allow_custom': True, 'max_suggestions': 10}
+            },
+            # Specialty Questions
+            {
+                'id': 10, 'name': 'constant_sum', 'display_name': 'Constant Sum',
+                'category': 'Specialty Questions', 'description': 'Numeric entries that sum to a specific total',
+                'config_schema': {'items': [], 'total_sum': 100, 'allow_decimals': False}
+            },
+            {
+                'id': 11, 'name': 'pick_group_rank', 'display_name': 'Pick, Group & Rank',
+                'category': 'Specialty Questions', 'description': 'Select, categorize, and rank items',
+                'config_schema': {'items': [], 'groups': [], 'max_picks': None, 'require_ranking': True}
+            },
+            {
+                'id': 12, 'name': 'hot_spot', 'display_name': 'Hot Spot',
+                'category': 'Specialty Questions', 'description': 'Click on areas of an image',
+                'config_schema': {'image_url': '', 'hot_spots': [], 'max_selections': None}
+            },
+            {
+                'id': 13, 'name': 'heat_map', 'display_name': 'Heat Map',
+                'category': 'Specialty Questions', 'description': 'Visual heat map responses on images',
+                'config_schema': {'image_url': '', 'heat_intensity': 'medium'}
+            },
+            {
+                'id': 14, 'name': 'graphic_slider', 'display_name': 'Graphic Slider',
+                'category': 'Specialty Questions', 'description': 'Slider with custom graphics',
+                'config_schema': {'min_value': 0, 'max_value': 100, 'step': 1, 'graphic_type': 'emoji', 'graphics': []}
+            },
+            {
+                'id': 15, 'name': 'drill_down', 'display_name': 'Drill Down',
+                'category': 'Specialty Questions', 'description': 'Hierarchical selection (country > state > city)',
+                'config_schema': {'levels': [], 'data_source': 'custom'}
+            },
+            {
+                'id': 16, 'name': 'net_promoter_score', 'display_name': 'Net Promoter Score',
+                'category': 'Specialty Questions', 'description': 'Standard NPS question with 0-10 scale',
+                'config_schema': {'scale_type': '0_to_10', 'labels': {'detractor': 'Not at all likely', 'promoter': 'Extremely likely'}}
+            },
+            {
+                'id': 17, 'name': 'highlight', 'display_name': 'Highlight',
+                'category': 'Specialty Questions', 'description': 'Highlight text or sections in content',
+                'config_schema': {'content': '', 'highlight_color': '#ffff00', 'max_highlights': None}
+            },
+            {
+                'id': 18, 'name': 'signature', 'display_name': 'Signature',
+                'category': 'Specialty Questions', 'description': 'Digital signature capture',
+                'config_schema': {'required': True, 'canvas_width': 400, 'canvas_height': 200}
+            },
+            {
+                'id': 19, 'name': 'video_response', 'display_name': 'Video Response',
+                'category': 'Specialty Questions', 'description': 'Record video responses',
+                'config_schema': {'max_duration': 300, 'allow_retake': True, 'quality': 'medium'}
+            },
+            {
+                'id': 20, 'name': 'user_testing', 'display_name': 'User Testing',
+                'category': 'Specialty Questions', 'description': 'Website or app usability testing',
+                'config_schema': {'target_url': '', 'tasks': [], 'record_screen': True}
+            },
+            {
+                'id': 21, 'name': 'tree_testing', 'display_name': 'Tree Testing',
+                'category': 'Specialty Questions', 'description': 'Information architecture testing',
+                'config_schema': {'tree_structure': {}, 'tasks': [], 'show_parent_labels': True}
+            },
+            # Advanced Questions
+            {
+                'id': 22, 'name': 'timing', 'display_name': 'Timing',
+                'category': 'Advanced Questions', 'description': 'Measure response time and page timing',
+                'config_schema': {'track_page_time': True, 'track_question_time': True, 'visible_timer': False}
+            },
+            {
+                'id': 23, 'name': 'meta_info', 'display_name': 'Meta Info',
+                'category': 'Advanced Questions', 'description': 'Capture browser and device information',
+                'config_schema': {'capture_browser': True, 'capture_device': True, 'capture_location': False}
+            },
+            {
+                'id': 24, 'name': 'file_upload', 'display_name': 'File Upload',
+                'category': 'Advanced Questions', 'description': 'Upload files and documents',
+                'config_schema': {'allowed_types': ['pdf', 'doc', 'docx', 'jpg', 'png'], 'max_size_mb': 10, 'max_files': 1}
+            },
+            {
+                'id': 25, 'name': 'captcha', 'display_name': 'Captcha',
+                'category': 'Advanced Questions', 'description': 'Bot prevention and verification',
+                'config_schema': {'captcha_type': 'recaptcha', 'difficulty': 'medium'}
+            },
+            {
+                'id': 26, 'name': 'location_selector', 'display_name': 'Location Selector',
+                'category': 'Advanced Questions', 'description': 'Geographic location selection',
+                'config_schema': {'selection_type': 'map', 'default_zoom': 10, 'restrict_country': None}
+            },
+            {
+                'id': 27, 'name': 'arcgis_map', 'display_name': 'ArcGIS Map',
+                'category': 'Advanced Questions', 'description': 'Advanced mapping with ArcGIS integration',
+                'config_schema': {'map_service_url': '', 'layers': [], 'tools': ['pan', 'zoom']}
+            }
+        ]
+        
+        # Clear existing question types and add new ones
+        QuestionType.query.delete()
+        
+        for qt_data in question_types_data:
+            question_type = QuestionType(
+                id=qt_data['id'],
+                name=qt_data['name'],
+                display_name=qt_data['display_name'],
+                category=qt_data['category'],
+                description=qt_data['description'],
+                config_schema=qt_data['config_schema'],
+                is_active=True
+            )
+            db.session.add(question_type)
+        
+        db.session.commit()
+        
+        return jsonify({
+            'message': 'Question types initialized successfully',
+            'count': len(question_types_data)
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error initializing question types: {str(e)}")
+        return jsonify({'error': 'Failed to initialize question types'}), 500
 
 if __name__ == '__main__':
     #with app.app_context():
