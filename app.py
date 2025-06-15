@@ -157,6 +157,24 @@ class UserDetails(db.Model):
 class Survey(db.Model):
     __tablename__ = 'surveys'
     id = db.Column(db.Integer, primary_key=True)
+    version_id = db.Column(db.Integer, db.ForeignKey('survey_template_versions.id'), nullable=False)
+    survey_code = db.Column(db.String(100), nullable=False, unique=True)
+    questions = db.Column(JSON, nullable=False)
+    sections = db.Column(JSON, nullable=True)  # Store section names and their order
+    created_at = db.Column(db.DateTime, server_default=db.func.current_timestamp())
+    updated_at = db.Column(db.DateTime, server_default=db.func.current_timestamp(),
+                           onupdate=db.func.current_timestamp())
+    
+    # Relationships
+    version = db.relationship('SurveyTemplateVersion', backref=db.backref('templates', lazy=True))
+    
+    def __repr__(self):
+        return f'<SurveyTemplate {self.survey_code}>'    
+
+class SurveyResponse(db.Model):
+    __tablename__ = 'survey_responses'
+    id = db.Column(db.Integer, primary_key=True)
+    template_id = db.Column(db.Integer, db.ForeignKey('survey_templates.id'), nullable=False)
     survey_code = db.Column(db.String(36), nullable=False, unique=True, default=lambda: str(uuid.uuid4()))
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     answers = db.Column(JSON, nullable=False)
@@ -175,6 +193,8 @@ class Survey(db.Model):
 
     def __repr__(self):
         return f'<Survey {self.survey_code} for User {self.user_id}>'
+
+
 
 # Routes
 
@@ -222,7 +242,8 @@ def login():
             "organization_id": user.organization_id,
             "username": user.username,
             "email": user.email,
-            "role": user.role
+            "role": user.role,
+            "survey_code": user.survey_code  # Include survey code for users
         }
     }), 200
 
@@ -628,6 +649,728 @@ def test_api():
         "message": "API is working"
     }), 200
 
+# Survey Template API Endpoints
+@app.route('/api/template-versions', methods=['GET'])
+def get_template_versions():
+    versions = SurveyTemplateVersion.query.all()
+    return jsonify([{"id": v.id, "name": v.name, "description": v.description, "created_at": v.created_at} for v in versions]), 200
+
+@app.route('/api/template-versions', methods=['POST'])
+def add_template_version():
+    data = request.get_json() or {}
+    if 'name' not in data:
+        return jsonify({'error': 'name required'}), 400
+    version = SurveyTemplateVersion(
+        name=data['name'],
+        description=data.get('description')
+    )
+    db.session.add(version)
+    db.session.commit()
+    return jsonify({
+        'id': version.id, 
+        'name': version.name, 
+        'description': version.description
+    }), 201
+
+@app.route('/api/template-versions/<int:version_id>', methods=['PUT'])
+def update_template_version(version_id):
+    version = SurveyTemplateVersion.query.get_or_404(version_id)
+    data = request.get_json() or {}
+    
+    updated = False
+    
+    if 'name' in data:
+        version.name = data['name']
+        updated = True
+    
+    if 'description' in data:
+        version.description = data['description']
+        updated = True
+    
+    if updated:
+        db.session.commit()
+        return jsonify({
+            'id': version.id,
+            'name': version.name,
+            'description': version.description,
+            'updated': True
+        }), 200
+    
+    return jsonify({'error': 'No valid fields to update'}), 400
+
+@app.route('/api/template-versions/<int:version_id>', methods=['DELETE'])
+def delete_template_version(version_id):
+    """Delete a template version and all its associated templates"""
+    try:
+        version = SurveyTemplateVersion.query.get_or_404(version_id)
+        
+        # Get all templates associated with this version
+        associated_templates = SurveyTemplate.query.filter_by(version_id=version_id).all()
+        template_ids = [template.id for template in associated_templates]
+        
+        # Delete records in the correct order to handle foreign key constraints
+        deleted_counts = {
+            'conditional_logic': 0,
+            'survey_responses': 0,
+            'questions': 0,
+            'question_options': 0,
+            'survey_versions': 0,
+            'templates': 0
+        }
+        
+        if template_ids:
+            # 1. Delete conditional_logic records that reference these templates
+            try:
+                conditional_logic_result = db.session.execute(
+                    text("DELETE FROM conditional_logic WHERE template_id IN :template_ids"),
+                    {"template_ids": tuple(template_ids)}
+                )
+                deleted_counts['conditional_logic'] = conditional_logic_result.rowcount
+                logger.info(f"Deleted {deleted_counts['conditional_logic']} conditional_logic records")
+            except Exception as e:
+                logger.warning(f"Error deleting conditional_logic records: {str(e)}")
+            
+            # 2. Delete survey responses
+            survey_responses = SurveyResponse.query.filter(SurveyResponse.template_id.in_(template_ids)).all()
+            for response in survey_responses:
+                db.session.delete(response)
+            deleted_counts['survey_responses'] = len(survey_responses)
+            
+            # 3. Delete questions and their options
+            questions = Question.query.filter(Question.template_id.in_(template_ids)).all()
+            question_ids = [q.id for q in questions]
+            
+            if question_ids:
+                # Delete question options first
+                question_options = QuestionOption.query.filter(QuestionOption.question_id.in_(question_ids)).all()
+                for option in question_options:
+                    db.session.delete(option)
+                deleted_counts['question_options'] = len(question_options)
+                
+                # Then delete questions
+                for question in questions:
+                    db.session.delete(question)
+                deleted_counts['questions'] = len(questions)
+            
+            # 4. Delete survey versions
+            survey_versions = SurveyVersion.query.filter(SurveyVersion.survey_id.in_(template_ids)).all()
+            for version_record in survey_versions:
+                db.session.delete(version_record)
+            deleted_counts['survey_versions'] = len(survey_versions)
+        
+        # 5. Delete the templates themselves
+        for template in associated_templates:
+            db.session.delete(template)
+        deleted_counts['templates'] = len(associated_templates)
+        
+        # 6. Finally delete the version itself
+        db.session.delete(version)
+        db.session.commit()
+        
+        logger.info(f"Successfully deleted template version {version_id} and all associated records: {deleted_counts}")
+        return jsonify({
+            'deleted': True, 
+            'version_id': version_id,
+            'deleted_counts': deleted_counts
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error deleting template version {version_id}: {str(e)}")
+        return jsonify({'error': f'Failed to delete template version: {str(e)}'}), 500
+
+@app.route('/api/templates', methods=['GET'])
+def get_templates():
+    templates = SurveyTemplate.query.all()
+    return jsonify([{
+        "id": t.id, 
+        "version_id": t.version_id,
+        "version_name": t.version.name,
+        "survey_code": t.survey_code,
+        "sections": t.sections,
+        "created_at": t.created_at
+    } for t in templates]), 200
+
+@app.route('/api/templates', methods=['POST'])
+def add_template():
+    data = request.get_json() or {}
+    required_keys = ['version_id', 'survey_code', 'questions']
+    if not all(k in data for k in required_keys):
+        return jsonify({'error': 'Missing required fields'}), 400
+    
+    # Check for duplicate survey_code
+    existing = SurveyTemplate.query.filter_by(survey_code=data['survey_code']).first()
+    if existing:
+        return jsonify({'error': 'Survey code already exists'}), 400
+        
+    template = SurveyTemplate(
+        version_id=data['version_id'],
+        survey_code=data['survey_code'],
+        questions=data['questions'],
+    )
+    db.session.add(template)
+    db.session.commit()
+    return jsonify({
+        'id': template.id,
+        'survey_code': template.survey_code
+    }), 201
+
+@app.route('/api/templates/<int:template_id>', methods=['GET'])
+def get_template(template_id):
+    template = SurveyTemplate.query.get_or_404(template_id)
+    return jsonify({
+        "id": template.id,
+        "version_id": template.version_id,
+        "version_name": template.version.name,
+        "survey_code": template.survey_code,
+        "questions": template.questions,
+        "sections": template.sections,
+        "created_at": template.created_at
+    }), 200
+
+@app.route('/api/templates/<int:template_id>', methods=['PUT'])
+def update_template(template_id):
+    template = SurveyTemplate.query.get_or_404(template_id)
+    data = request.get_json() or {}
+    
+    updated = False
+    
+    # Allow updating survey_code (template name)
+    if 'survey_code' in data:
+        logger.info(f"Updating survey_code for template {template_id} to: {data['survey_code']}")
+        template.survey_code = data['survey_code']
+        updated = True
+    
+    # Allow updating questions
+    if 'questions' in data:
+        logger.info(f"Updating questions for template {template_id}")
+        logger.debug(f"New questions data: {data['questions']}")
+        
+        # Validate that all questions have required fields
+        for question in data['questions']:
+            if not all(key in question for key in ['id', 'question_text', 'question_type_id', 'order']):
+                return jsonify({'error': 'Invalid question data: missing required fields'}), 400
+        
+        template.questions = data['questions']
+        
+        # Auto-update sections based on questions
+        sections_from_questions = {}
+        for question in data['questions']:
+            section_name = question.get('section', 'Uncategorized')
+            if section_name not in sections_from_questions:
+                sections_from_questions[section_name] = len(sections_from_questions)
+        
+        # Preserve existing section order if available, add new sections at the end
+        existing_sections = template.sections or {}
+        updated_sections = {}
+        
+        # First, add existing sections in their current order
+        for section_name, order in existing_sections.items():
+            if section_name in sections_from_questions:
+                updated_sections[section_name] = order
+        
+        # Then add new sections
+        max_order = max(existing_sections.values()) if existing_sections else -1
+        for section_name in sections_from_questions:
+            if section_name not in updated_sections:
+                max_order += 1
+                updated_sections[section_name] = max_order
+        
+        template.sections = updated_sections
+        updated = True
+    
+    # Allow updating sections order
+    if 'sections' in data:
+        logger.info(f"Updating sections for template {template_id}")
+        logger.debug(f"New sections data: {data['sections']}")
+        template.sections = data['sections']
+        updated = True
+    
+    if updated:
+        db.session.commit()
+        logger.info(f"Successfully updated template {template_id}")
+        return jsonify({'updated': True}), 200
+    
+    return jsonify({'error': 'No valid fields to update'}), 400
+
+@app.route('/api/templates/<int:template_id>', methods=['DELETE'])
+def delete_template(template_id):
+    """Delete a template and all its associated records"""
+    try:
+        template = SurveyTemplate.query.get_or_404(template_id)
+        
+        # Delete records in the correct order to handle foreign key constraints
+        deleted_counts = {
+            'conditional_logic': 0,
+            'survey_responses': 0,
+            'questions': 0,
+            'question_options': 0,
+            'survey_versions': 0
+        }
+        
+        # 1. Delete conditional_logic records that reference this template
+        try:
+            conditional_logic_result = db.session.execute(
+                text("DELETE FROM conditional_logic WHERE template_id = :template_id"),
+                {"template_id": template_id}
+            )
+            deleted_counts['conditional_logic'] = conditional_logic_result.rowcount
+            logger.info(f"Deleted {deleted_counts['conditional_logic']} conditional_logic records")
+        except Exception as e:
+            logger.warning(f"Error deleting conditional_logic records: {str(e)}")
+        
+        # 2. Delete survey responses
+        survey_responses = SurveyResponse.query.filter_by(template_id=template_id).all()
+        for response in survey_responses:
+            db.session.delete(response)
+        deleted_counts['survey_responses'] = len(survey_responses)
+        
+        # 3. Delete questions and their options
+        questions = Question.query.filter_by(template_id=template_id).all()
+        question_ids = [q.id for q in questions]
+        
+        if question_ids:
+            # Delete question options first
+            question_options = QuestionOption.query.filter(QuestionOption.question_id.in_(question_ids)).all()
+            for option in question_options:
+                db.session.delete(option)
+            deleted_counts['question_options'] = len(question_options)
+            
+            # Then delete questions
+            for question in questions:
+                db.session.delete(question)
+            deleted_counts['questions'] = len(questions)
+        
+        # 4. Delete survey versions
+        survey_versions = SurveyVersion.query.filter_by(survey_id=template_id).all()
+        for version in survey_versions:
+            db.session.delete(version)
+        deleted_counts['survey_versions'] = len(survey_versions)
+        
+        # 5. Finally delete the template itself
+        db.session.delete(template)
+        db.session.commit()
+        
+        logger.info(f"Successfully deleted template {template_id} and all associated records: {deleted_counts}")
+        return jsonify({
+            'deleted': True,
+            'template_id': template_id,
+            'deleted_counts': deleted_counts
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error deleting template {template_id}: {str(e)}")
+        return jsonify({'error': f'Failed to delete template: {str(e)}'}), 500
+
+@app.route('/api/templates/<int:template_id>/questions/<int:question_id>', methods=['DELETE'])
+def delete_template_question(template_id, question_id):
+    template = SurveyTemplate.query.get_or_404(template_id)
+    questions = template.questions or []
+    updated = [q for q in questions if q.get('id') != question_id]
+    template.questions = updated
+    db.session.commit()
+    return jsonify({'deleted': True}), 200
+
+@app.route('/api/templates/<int:template_id>/sections', methods=['GET'])
+def get_template_sections(template_id):
+    """Get sections for a template with their order"""
+    template = SurveyTemplate.query.get_or_404(template_id)
+    
+    # Get sections from template.sections or derive from questions
+    if template.sections:
+        sections = template.sections
+    else:
+        # Derive sections from questions
+        sections = {}
+        for question in (template.questions or []):
+            section_name = question.get('section', 'Uncategorized')
+            if section_name not in sections:
+                sections[section_name] = len(sections)
+    
+    # Convert to list format sorted by order
+    sections_list = [{'name': name, 'order': order} for name, order in sections.items()]
+    sections_list.sort(key=lambda x: x['order'])
+    
+    return jsonify(sections_list), 200
+
+@app.route('/api/templates/<int:template_id>/sections', methods=['PUT'])
+def update_template_sections(template_id):
+    """Update section order for a template"""
+    template = SurveyTemplate.query.get_or_404(template_id)
+    data = request.get_json() or {}
+    
+    if 'sections' not in data:
+        return jsonify({'error': 'sections field is required'}), 400
+    
+    # Convert list format back to dict format
+    sections_dict = {}
+    for i, section in enumerate(data['sections']):
+        if isinstance(section, dict) and 'name' in section:
+            sections_dict[section['name']] = i
+        elif isinstance(section, str):
+            sections_dict[section] = i
+    
+    template.sections = sections_dict
+    db.session.commit()
+    
+    return jsonify({'updated': True}), 200
+
+# Survey Responses API Endpoints
+@app.route('/api/responses', methods=['GET'])
+def get_responses():
+    responses = SurveyResponse.query.all()
+    return jsonify([{
+        "id": r.id,
+        "template_id": r.template_id,
+        "user_id": r.user_id,
+        "status": r.status,
+        "created_at": r.created_at
+    } for r in responses]), 200
+
+@app.route('/api/templates/<int:template_id>/responses', methods=['POST'])
+def add_response(template_id):
+    data = request.get_json() or {}
+    if 'user_id' not in data or 'answers' not in data:
+        return jsonify({'error': 'Missing required fields'}), 400
+        
+    response = SurveyResponse(
+        template_id=template_id,
+        user_id=data['user_id'],
+        answers=data['answers'],
+        status=data.get('status', 'pending')
+    )
+    db.session.add(response)
+    db.session.commit()
+    return jsonify({
+        'id': response.id,
+        'status': response.status
+    }), 201
+
+@app.route('/api/responses/<int:response_id>', methods=['GET'])
+def get_response(response_id):
+    response = SurveyResponse.query.get_or_404(response_id)
+    return jsonify({
+        "id": response.id,
+        "template_id": response.template_id,
+        "user_id": response.user_id,
+        "answers": response.answers,
+        "status": response.status,
+        "created_at": response.created_at,
+        "updated_at": response.updated_at
+    }), 200
+
+@app.route('/api/responses/<int:response_id>', methods=['PUT'])
+def update_response(response_id):
+    response = SurveyResponse.query.get_or_404(response_id)
+    data = request.get_json() or {}
+    
+    for field in ['answers', 'status']:
+        if field in data:
+            setattr(response, field, data[field])
+    
+    db.session.commit()
+    return jsonify({'updated': True}), 200
+
+# Legacy Inventory endpoints for backward compatibility
+@app.route('/api/surveys/<int:survey_id>/versions', methods=['GET'])
+def get_survey_versions(survey_id):
+    # For backward compatibility
+    return jsonify([]), 200
+
+@app.route('/api/surveys/<int:survey_id>/versions', methods=['POST'])
+def add_survey_version(survey_id):
+    # For backward compatibility
+    return jsonify({'error': 'API deprecated, use template API instead'}), 400
+
+@app.route('/api/versions/<int:version_id>', methods=['DELETE'])
+def delete_survey_version(version_id):
+    # For backward compatibility
+    return jsonify({'error': 'API deprecated, use template API instead'}), 400
+
+@app.route('/api/versions/<int:version_id>/questions', methods=['GET'])
+def get_version_questions(version_id):
+    # For backward compatibility
+    return jsonify([]), 200
+
+@app.route('/api/versions/<int:version_id>/questions', methods=['POST'])
+def add_version_question(version_id):
+    # For backward compatibility
+    return jsonify({'error': 'API deprecated, use template API instead'}), 400
+
+@app.route('/api/questions/<int:question_id>', methods=['PUT'])
+def update_question(question_id):
+    # For backward compatibility
+    return jsonify({'error': 'API deprecated, use template API instead'}), 400
+
+@app.route('/api/questions/<int:question_id>', methods=['DELETE'])
+def delete_question(question_id):
+    # For backward compatibility
+    return jsonify({'error': 'API deprecated, use template API instead'}), 400
+
+# Organization API Endpoints
+@app.route('/api/organizations', methods=['GET'])
+def get_organizations():
+    organizations = Organization.query.all()
+    result = []
+    for org in organizations:
+        org_data = {
+            'id': org.id,
+            'name': org.name,
+            'type': org.type,
+        }
+        result.append(org_data)
+    return jsonify(result)
+
+@app.route('/api/organizations/<int:org_id>', methods=['GET'])
+def get_organization(org_id):
+    org = Organization.query.get_or_404(org_id)
+    result = {
+        'id': org.id,
+        'name': org.name,
+        'type': org.type
+    }
+    return jsonify(result)
+
+@app.route('/api/organizations', methods=['POST'])
+def add_organization():
+    data = request.get_json()
+    
+    # Create the organization without type-specific details
+    new_org = Organization(
+        name=data['name'],
+        type=data['type']
+    )
+    
+    db.session.add(new_org)
+    db.session.commit()
+    
+    return jsonify({
+        'message': 'Organization added successfully',
+        'id': new_org.id
+    }), 201
+
+@app.route('/api/organizations/<int:org_id>', methods=['PUT'])
+def update_organization(org_id):
+    org = Organization.query.get_or_404(org_id)
+    data = request.get_json()
+    
+    # Update basic organization fields only
+    org.name = data.get('name', org.name)
+    org.type = data.get('type', org.type)
+    
+    db.session.commit()
+    
+    return jsonify({'message': 'Organization updated successfully'})
+
+@app.route('/api/organizations/<int:org_id>', methods=['DELETE'])
+def delete_organization(org_id):
+    org = Organization.query.get_or_404(org_id)
+    
+    # Delete organization
+    db.session.delete(org)
+    db.session.commit()
+    
+    return jsonify({'message': 'Organization deleted successfully'})
+
+@app.route('/api/organizations/<int:org_id>/users', methods=['GET'])
+def get_organization_users(org_id):
+    # Check if organization exists
+    org = Organization.query.get_or_404(org_id)
+    
+    # Get users directly associated with the organization
+    users = User.query.filter_by(organization_id=org_id).all()
+    
+    result = []
+    for user in users:
+        user_data = {
+            'id': user.id,
+            'username': user.username,
+            'email': user.email,
+            'role': user.role,
+            'firstname': user.firstname,
+            'lastname': user.lastname
+        }
+        result.append(user_data)
+    
+    return jsonify(result)
+
+# File upload endpoint for organizations
+@app.route('/api/organizations/upload', methods=['POST'])
+def upload_organizations():
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file part'}), 400
+    
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({'error': 'No selected file'}), 400
+    
+    # Check file extension
+    if not (file.filename.endswith('.csv') or file.filename.endswith('.xlsx')):
+        return jsonify({'error': 'File must be CSV or XLSX format'}), 400
+    
+    # Save the file temporarily
+    filename = secure_filename(file.filename)
+    file_path = os.path.join('/tmp', filename)
+    file.save(file_path)
+    
+    # Process the file (placeholder - actual implementation would depend on file format)
+    try:
+        # This is a placeholder for the actual file processing logic
+        # In a real implementation, you would parse the CSV/XLSX and create organizations
+        return jsonify({
+            'message': 'File uploaded successfully',
+            'filename': filename,
+            'status': 'pending_processing'
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        # Clean up the temporary file
+        if os.path.exists(file_path):
+            os.remove(file_path)
+
+# User API Endpoints
+@app.route('/api/users', methods=['GET'])
+def get_all_users():
+    users = User.query.all()
+    result = []
+    for user in users:
+        # Note: OrganizationUserRole has been removed
+        # No roles will be included in the response
+        
+        user_data = {
+            'id': user.id,
+            'username': user.username,
+            'email': user.email,
+            'role': user.role,
+            'firstname': user.firstname,
+            'lastname': user.lastname,
+            'organization_id': user.organization_id
+        }
+        result.append(user_data)
+    return jsonify(result)
+
+@app.route('/api/users/<int:user_id>', methods=['GET'])
+def get_user(user_id):
+    user = User.query.get_or_404(user_id)
+    
+    # Note: OrganizationUserRole has been removed
+    # No roles will be included in the response
+    
+    result = {
+        'id': user.id,
+        'username': user.username,
+        'email': user.email,
+        'role': user.role,
+        'firstname': user.firstname,
+        'lastname': user.lastname,
+        'organization_id': user.organization_id
+    }
+    return jsonify(result)
+
+@app.route('/api/users', methods=['POST'])
+def add_user():
+    data = request.get_json()
+    
+    # Create the user
+    new_user = User(
+        username=data['username'],
+        email=data['email'],
+        password=data['password'],  # In production, this should be hashed
+        role=data.get('role', 'user'),
+        firstname=data.get('firstname'),
+        lastname=data.get('lastname'),
+        organization_id=data.get('organization_id')
+    )
+    
+    db.session.add(new_user)
+    db.session.commit()
+    
+    # Note: OrganizationUserRole has been removed
+    # No role assignments will be performed
+    
+    return jsonify({
+        'message': 'User added successfully',
+        'id': new_user.id
+    }), 201
+
+@app.route('/api/users/<int:user_id>', methods=['PUT'])
+def update_user(user_id):
+    user = User.query.get_or_404(user_id)
+    data = request.get_json()
+    
+    # Update user fields
+    if 'username' in data:
+        user.username = data['username']
+    if 'email' in data:
+        user.email = data['email']
+    if 'password' in data:
+        user.password = data['password']  # In production, this should be hashed
+    if 'role' in data:
+        user.role = data['role']
+    if 'firstname' in data:
+        user.firstname = data['firstname']
+    if 'lastname' in data:
+        user.lastname = data['lastname']
+    if 'organization_id' in data:
+        user.organization_id = data['organization_id']
+    
+    # Note: OrganizationUserRole has been removed
+    # No role management operations will be performed
+    
+    db.session.commit()
+    
+    return jsonify({'message': 'User updated successfully'})
+
+@app.route('/api/users/<int:user_id>', methods=['DELETE'])
+def delete_user(user_id):
+    user = User.query.get_or_404(user_id)
+    
+    # Note: OrganizationUserRole has been removed
+    # No need to delete related roles
+    
+    # Delete user
+    db.session.delete(user)
+    db.session.commit()
+    
+    return jsonify({'message': 'User deleted successfully'})
+
+# File upload endpoint for users
+@app.route('/api/users/upload', methods=['POST'])
+def upload_users():
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file part'}), 400
+    
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({'error': 'No selected file'}), 400
+    
+    # Check file extension
+    if not (file.filename.endswith('.csv') or file.filename.endswith('.xlsx')):
+        return jsonify({'error': 'File must be CSV or XLSX format'}), 400
+    
+    # Save the file temporarily
+    filename = secure_filename(file.filename)
+    file_path = os.path.join('/tmp', filename)
+    file.save(file_path)
+    
+    # Process the file (placeholder - actual implementation would depend on file format)
+    try:
+        # This is a placeholder for the actual file processing logic
+        # In a real implementation, you would parse the CSV/XLSX and create users
+        return jsonify({
+            'message': 'File uploaded successfully',
+            'filename': filename,
+            'status': 'pending_processing'
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        # Clean up the temporary file
+        if os.path.exists(file_path):
+            os.remove(file_path)
+
 # To initialize the database tables (run once)
 @app.cli.command('init-db')
 def init_db():
@@ -646,6 +1389,7 @@ def get_users_with_role_user():
             'email': user.email,
             'firstname': user.firstname,
             'lastname': user.lastname,
+            'survey_code': user.survey_code,  # Include survey code for sharing with respondents
             'organization': {
                 'id': user.organization.id,
                 'name': user.organization.name,
@@ -735,147 +1479,54 @@ def get_question_type_categories():
 
 @app.route('/api/question-types/initialize', methods=['POST'])
 def initialize_question_types():
-    """Initialize the database with all question types from the configuration"""
+    """Initialize the database with the nine core question types only"""
     try:
-        # Question types data matching the frontend configuration
+        # Nine core question types data - no conditional logic
         question_types_data = [
-            # Standard Content Questions
             {
-                'id': 1, 'name': 'text_graphic', 'display_name': 'Text / Graphic',
-                'category': 'Standard Content', 'description': 'Display text, images, or other media content',
-                'config_schema': {'content_type': 'text', 'content': '', 'alignment': 'left'}
+                'id': 1, 'name': 'short_text', 'display_name': 'Short Text',
+                'category': 'Core Questions', 'description': 'Brief free-text responses and fill-in-the-blank fields',
+                'config_schema': {'max_length': 255, 'placeholder': '', 'required': False}
             },
             {
-                'id': 2, 'name': 'multiple_choice', 'display_name': 'Multiple Choice',
-                'category': 'Standard Content', 'description': 'Single or multiple selection from predefined options',
-                'config_schema': {'selection_type': 'single', 'options': [], 'randomize_options': False, 'allow_other': False, 'other_text': 'Other (please specify)'}
+                'id': 2, 'name': 'single_choice', 'display_name': 'Single Choice',
+                'category': 'Core Questions', 'description': 'Radio button selection from predefined categorical options',
+                'config_schema': {'options': [], 'required': False}
             },
             {
-                'id': 3, 'name': 'matrix_table', 'display_name': 'Matrix Table',
-                'category': 'Standard Content', 'description': 'Grid of questions with same answer choices',
-                'config_schema': {'statements': [], 'scale_points': [], 'force_response': False, 'randomize_statements': False}
+                'id': 3, 'name': 'yes_no', 'display_name': 'Yes/No',
+                'category': 'Core Questions', 'description': 'Binary choice questions for clear decision points',
+                'config_schema': {'yes_label': 'Yes', 'no_label': 'No', 'required': False}
             },
             {
-                'id': 4, 'name': 'text_entry', 'display_name': 'Text Entry',
-                'category': 'Standard Content', 'description': 'Open-ended text responses',
-                'config_schema': {'input_type': 'single_line', 'validation': None, 'max_length': None, 'placeholder': ''}
+                'id': 4, 'name': 'likert5', 'display_name': 'Five-Point Likert Scale',
+                'category': 'Core Questions', 'description': 'Five-point scale from "A great deal" to "None"',
+                'config_schema': {'scale_labels': {1: 'None', 2: 'A little', 3: 'A moderate amount', 4: 'A lot', 5: 'A great deal'}, 'required': False}
             },
             {
-                'id': 5, 'name': 'form_field', 'display_name': 'Form Field',
-                'category': 'Standard Content', 'description': 'Structured form inputs (name, address, etc.)',
-                'config_schema': {'field_type': 'name', 'required_fields': [], 'format': 'standard'}
+                'id': 5, 'name': 'multi_select', 'display_name': 'Multiple Select',
+                'category': 'Core Questions', 'description': '"Select all that apply" checkbox questions',
+                'config_schema': {'options': [], 'required': False}
             },
             {
-                'id': 6, 'name': 'slider', 'display_name': 'Slider',
-                'category': 'Standard Content', 'description': 'Numeric input using a slider interface',
-                'config_schema': {'min_value': 0, 'max_value': 100, 'step': 1, 'default_value': None, 'labels': {'min_label': '', 'max_label': ''}}
+                'id': 6, 'name': 'paragraph', 'display_name': 'Paragraph Text',
+                'category': 'Core Questions', 'description': 'Open-ended narrative and essay responses',
+                'config_schema': {'max_length': 2000, 'placeholder': '', 'required': False}
             },
             {
-                'id': 7, 'name': 'rank_order', 'display_name': 'Rank Order',
-                'category': 'Standard Content', 'description': 'Drag and drop ranking of items',
-                'config_schema': {'items': [], 'force_ranking': True, 'randomize_items': False}
+                'id': 7, 'name': 'numeric', 'display_name': 'Numeric Entry',
+                'category': 'Core Questions', 'description': 'Absolute number input with validation',
+                'config_schema': {'number_type': 'integer', 'min_value': None, 'max_value': None, 'required': False}
             },
             {
-                'id': 8, 'name': 'side_by_side', 'display_name': 'Side by Side',
-                'category': 'Standard Content', 'description': 'Multiple questions displayed horizontally',
-                'config_schema': {'questions': [], 'layout': 'equal_width'}
+                'id': 8, 'name': 'percentage', 'display_name': 'Percentage Allocation',
+                'category': 'Core Questions', 'description': 'Distribution and allocation percentage questions',
+                'config_schema': {'items': [], 'total_percentage': 100, 'required': False}
             },
             {
-                'id': 9, 'name': 'autocomplete', 'display_name': 'Autocomplete',
-                'category': 'Standard Content', 'description': 'Text input with autocomplete suggestions',
-                'config_schema': {'suggestions': [], 'allow_custom': True, 'max_suggestions': 10}
-            },
-            # Specialty Questions
-            {
-                'id': 10, 'name': 'constant_sum', 'display_name': 'Constant Sum',
-                'category': 'Specialty Questions', 'description': 'Numeric entries that sum to a specific total',
-                'config_schema': {'items': [], 'total_sum': 100, 'allow_decimals': False}
-            },
-            {
-                'id': 11, 'name': 'pick_group_rank', 'display_name': 'Pick, Group & Rank',
-                'category': 'Specialty Questions', 'description': 'Select, categorize, and rank items',
-                'config_schema': {'items': [], 'groups': [], 'max_picks': None, 'require_ranking': True}
-            },
-            {
-                'id': 12, 'name': 'hot_spot', 'display_name': 'Hot Spot',
-                'category': 'Specialty Questions', 'description': 'Click on areas of an image',
-                'config_schema': {'image_url': '', 'hot_spots': [], 'max_selections': None}
-            },
-            {
-                'id': 13, 'name': 'heat_map', 'display_name': 'Heat Map',
-                'category': 'Specialty Questions', 'description': 'Visual heat map responses on images',
-                'config_schema': {'image_url': '', 'heat_intensity': 'medium'}
-            },
-            {
-                'id': 14, 'name': 'graphic_slider', 'display_name': 'Graphic Slider',
-                'category': 'Specialty Questions', 'description': 'Slider with custom graphics',
-                'config_schema': {'min_value': 0, 'max_value': 100, 'step': 1, 'graphic_type': 'emoji', 'graphics': []}
-            },
-            {
-                'id': 15, 'name': 'drill_down', 'display_name': 'Drill Down',
-                'category': 'Specialty Questions', 'description': 'Hierarchical selection (country > state > city)',
-                'config_schema': {'levels': [], 'data_source': 'custom'}
-            },
-            {
-                'id': 16, 'name': 'net_promoter_score', 'display_name': 'Net Promoter Score',
-                'category': 'Specialty Questions', 'description': 'Standard NPS question with 0-10 scale',
-                'config_schema': {'scale_type': '0_to_10', 'labels': {'detractor': 'Not at all likely', 'promoter': 'Extremely likely'}}
-            },
-            {
-                'id': 17, 'name': 'highlight', 'display_name': 'Highlight',
-                'category': 'Specialty Questions', 'description': 'Highlight text or sections in content',
-                'config_schema': {'content': '', 'highlight_color': '#ffff00', 'max_highlights': None}
-            },
-            {
-                'id': 18, 'name': 'signature', 'display_name': 'Signature',
-                'category': 'Specialty Questions', 'description': 'Digital signature capture',
-                'config_schema': {'required': True, 'canvas_width': 400, 'canvas_height': 200}
-            },
-            {
-                'id': 19, 'name': 'video_response', 'display_name': 'Video Response',
-                'category': 'Specialty Questions', 'description': 'Record video responses',
-                'config_schema': {'max_duration': 300, 'allow_retake': True, 'quality': 'medium'}
-            },
-            {
-                'id': 20, 'name': 'user_testing', 'display_name': 'User Testing',
-                'category': 'Specialty Questions', 'description': 'Website or app usability testing',
-                'config_schema': {'target_url': '', 'tasks': [], 'record_screen': True}
-            },
-            {
-                'id': 21, 'name': 'tree_testing', 'display_name': 'Tree Testing',
-                'category': 'Specialty Questions', 'description': 'Information architecture testing',
-                'config_schema': {'tree_structure': {}, 'tasks': [], 'show_parent_labels': True}
-            },
-            # Advanced Questions
-            {
-                'id': 22, 'name': 'timing', 'display_name': 'Timing',
-                'category': 'Advanced Questions', 'description': 'Measure response time and page timing',
-                'config_schema': {'track_page_time': True, 'track_question_time': True, 'visible_timer': False}
-            },
-            {
-                'id': 23, 'name': 'meta_info', 'display_name': 'Meta Info',
-                'category': 'Advanced Questions', 'description': 'Capture browser and device information',
-                'config_schema': {'capture_browser': True, 'capture_device': True, 'capture_location': False}
-            },
-            {
-                'id': 24, 'name': 'file_upload', 'display_name': 'File Upload',
-                'category': 'Advanced Questions', 'description': 'Upload files and documents',
-                'config_schema': {'allowed_types': ['pdf', 'doc', 'docx', 'jpg', 'png'], 'max_size_mb': 10, 'max_files': 1}
-            },
-            {
-                'id': 25, 'name': 'captcha', 'display_name': 'Captcha',
-                'category': 'Advanced Questions', 'description': 'Bot prevention and verification',
-                'config_schema': {'captcha_type': 'recaptcha', 'difficulty': 'medium'}
-            },
-            {
-                'id': 26, 'name': 'location_selector', 'display_name': 'Location Selector',
-                'category': 'Advanced Questions', 'description': 'Geographic location selection',
-                'config_schema': {'selection_type': 'map', 'default_zoom': 10, 'restrict_country': None}
-            },
-            {
-                'id': 27, 'name': 'arcgis_map', 'display_name': 'ArcGIS Map',
-                'category': 'Advanced Questions', 'description': 'Advanced mapping with ArcGIS integration',
-                'config_schema': {'map_service_url': '', 'layers': [], 'tools': ['pan', 'zoom']}
+                'id': 9, 'name': 'year_matrix', 'display_name': 'Year Matrix',
+                'category': 'Core Questions', 'description': 'Row-by-year grid for temporal data collection',
+                'config_schema': {'rows': [], 'start_year': 2024, 'end_year': 2029, 'required': False}
             }
         ]
         
@@ -897,7 +1548,7 @@ def initialize_question_types():
         db.session.commit()
         
         return jsonify({
-            'message': 'Question types initialized successfully',
+            'message': 'Core question types initialized successfully',
             'count': len(question_types_data)
         }), 200
         
