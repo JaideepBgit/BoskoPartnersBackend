@@ -1212,7 +1212,6 @@ def get_templates():
         "version_id": t.version_id,
         "version_name": t.version.name,
         "survey_code": t.survey_code,
-        "sections": t.sections,
         "created_at": t.created_at
     } for t in templates]), 200
 
@@ -1260,7 +1259,6 @@ def get_template(template_id):
         "version_name": template.version.name,
         "survey_code": template.survey_code,
         "questions": template.questions,
-        "sections": template.sections,
         "created_at": template.created_at
     }), 200
 
@@ -1289,38 +1287,6 @@ def update_template(template_id):
                 return jsonify({'error': 'Invalid question data: missing required fields'}), 400
         
         template.questions = data['questions']
-        
-        # Auto-update sections based on questions
-        sections_from_questions = {}
-        for question in data['questions']:
-            section_name = question.get('section', 'Uncategorized')
-            if section_name not in sections_from_questions:
-                sections_from_questions[section_name] = len(sections_from_questions)
-        
-        # Preserve existing section order if available, add new sections at the end
-        existing_sections = template.sections or {}
-        updated_sections = {}
-        
-        # First, add existing sections in their current order
-        for section_name, order in existing_sections.items():
-            if section_name in sections_from_questions:
-                updated_sections[section_name] = order
-        
-        # Then add new sections
-        max_order = max(existing_sections.values()) if existing_sections else -1
-        for section_name in sections_from_questions:
-            if section_name not in updated_sections:
-                max_order += 1
-                updated_sections[section_name] = max_order
-        
-        template.sections = updated_sections
-        updated = True
-    
-    # Allow updating sections order
-    if 'sections' in data:
-        logger.info(f"Updating sections for template {template_id}")
-        logger.debug(f"New sections data: {data['sections']}")
-        template.sections = data['sections']
         updated = True
     
     if updated:
@@ -1408,7 +1374,6 @@ def delete_template_question(template_id, question_id):
     template.questions = updated
     db.session.commit()
     return jsonify({'deleted': True}), 200
-
 
 # Survey Responses API Endpoints
 @app.route('/api/responses', methods=['GET'])
