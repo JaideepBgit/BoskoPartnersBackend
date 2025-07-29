@@ -4209,10 +4209,15 @@ def initialize_question_types():
             {
                 'id': 8, 'name': 'percentage', 'display_name': 'Percentage Allocation',
                 'category': 'Core Questions', 'description': 'Distribution and allocation percentage questions',
-                'config_schema': {'items': [], 'total_percentage': 100, 'required': False}
+                'config_schema': {'items': [], 'total_percentage': 100, 'allow_decimals': False, 'required': False}
             },
             {
-                'id': 9, 'name': 'year_matrix', 'display_name': 'Year Matrix',
+                'id': 9, 'name': 'flexible_input', 'display_name': 'Flexible Input',
+                'category': 'Core Questions', 'description': 'Collect alphanumeric responses across multiple items',
+                'config_schema': {'items': [], 'instructions': '', 'placeholder': 'Enter your response', 'required': False}
+            },
+            {
+                'id': 10, 'name': 'year_matrix', 'display_name': 'Year Matrix',
                 'category': 'Core Questions', 'description': 'Row-by-year grid for temporal data collection',
                 'config_schema': {'rows': [], 'start_year': 2024, 'end_year': 2029, 'required': False}
             }
@@ -4244,6 +4249,8 @@ def initialize_question_types():
         db.session.rollback()
         logger.error(f"Error initializing question types: {str(e)}")
         return jsonify({'error': 'Failed to initialize question types'}), 500
+
+# Note: Constant sum is now handled as a simple question type like others
 
 @app.route('/api/initialize-enhanced-data', methods=['POST'])
 def initialize_enhanced_data():
