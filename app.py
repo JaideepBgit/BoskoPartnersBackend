@@ -4,6 +4,7 @@ from flask_cors import CORS
 from sqlalchemy.dialects.mysql import JSON
 from sqlalchemy import text
 from sqlalchemy import UniqueConstraint
+from sqlalchemy.orm import joinedload
 import json 
 from datetime import datetime
 import logging
@@ -551,6 +552,365 @@ The Saurara Research Team
         logger.error(f"Error sending welcome email via SES API: {str(e)}")
         logger.warning("SES API failed, trying SMTP method as fallback...")
         return send_welcome_email_smtp(to_email, username, password, firstname, survey_code)
+
+def send_survey_assignment_email(to_email, username, survey_code, firstname=None, organization_name=None, survey_name=None, assigned_by=None):
+    """Send survey assignment email to user (tries SES API first, falls back to SMTP)"""
+    try:
+        ses_client = get_ses_client()
+        if not ses_client:
+            logger.warning("SES API client failed, trying SMTP method...")
+            return send_survey_assignment_email_smtp(to_email, username, survey_code, firstname, organization_name, survey_name, assigned_by)
+        
+        # Email content
+        subject = f"📋 New Survey Assignment: {survey_name or 'Survey'}"
+        greeting = f"Dear {firstname}" if firstname else f"Dear {username}"
+        org_text = f" from {organization_name}" if organization_name else ""
+        assigned_by_text = f" by {assigned_by}" if assigned_by else " by your administrator"
+        survey_title = survey_name or "New Survey"
+        
+        body_text = f"""{greeting},
+
+We're pleased to inform you that you have been assigned a new survey{org_text} on the Saurara Platform!
+
+📋 Survey Assignment Details:
+• Survey: {survey_title}
+• Assigned{assigned_by_text}
+• Username: {username}
+• Survey Code: {survey_code}
+• Survey Link: www.saurara.org
+
+🎯 About This Survey:
+You have been specifically selected to participate in this important research initiative. Your insights and experiences are valuable to understanding and improving educational and community programs.
+
+📝 How to Access Your Survey:
+1. Visit www.saurara.org
+2. Click on "Survey Access" or "Login"
+3. Enter your survey code: {survey_code}
+4. Complete the survey at your convenience
+5. Submit your responses when finished
+
+⏱️ Survey Information:
+• Estimated completion time: 15-20 minutes
+• You can save your progress and return later
+• All responses are confidential and secure
+• Your participation is greatly appreciated
+
+🌟 Why Your Participation Matters:
+Your responses contribute to meaningful research that helps improve educational initiatives and community programs. Every answer you provide helps us better understand the needs and challenges in your field.
+
+Need Help?
+If you have any questions about the survey or experience technical difficulties, please don't hesitate to contact our support team. We're here to ensure you have a smooth experience.
+
+Thank you for your time and valuable contribution to this research!
+
+Best regards,
+The Saurara Research Team
+
+---
+Survey Platform: www.saurara.org | Support: support@saurara.org"""
+
+        body_html = f"""
+        <html>
+        <head>
+            <style>
+                body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; line-height: 1.6; color: #333; }}
+                .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+                .header {{ background: linear-gradient(135deg, #28a745 0%, #20c997 100%); color: white; padding: 30px 20px; text-align: center; border-radius: 10px 10px 0 0; }}
+                .content {{ background: #ffffff; padding: 30px; border: 1px solid #e0e0e0; }}
+                .footer {{ background: #f8f9fa; padding: 20px; border-radius: 0 0 10px 10px; border: 1px solid #e0e0e0; border-top: none; }}
+                .highlight {{ background: #e8f5e8; padding: 15px; border-left: 4px solid #28a745; margin: 20px 0; }}
+                .survey-details {{ background: #f0f8ff; padding: 20px; border-radius: 8px; margin: 20px 0; }}
+                .button {{ display: inline-block; background: #28a745; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold; margin: 10px 0; }}
+                .steps {{ background: #fff9e6; padding: 20px; border-radius: 8px; margin: 20px 0; }}
+                .steps ol {{ margin: 0; padding-left: 20px; }}
+                .steps li {{ margin: 8px 0; }}
+                .assignment-tag {{ background: #28a745; color: white; padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: bold; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <h1 style="margin: 0; font-size: 28px;">📋 New Survey Assignment</h1>
+                    <p style="margin: 10px 0 0 0; font-size: 16px; opacity: 0.9;">Saurara Research Platform</p>
+                    <span class="assignment-tag">NEW ASSIGNMENT</span>
+                </div>
+                
+                <div class="content">
+                    <p style="font-size: 18px; margin-bottom: 20px;">{greeting},</p>
+                    
+                    <p>We're pleased to inform you that you have been assigned a new survey{org_text} on the Saurara Platform!</p>
+                    
+                    <div class="highlight">
+                        <p><strong>🎯 Survey Assignment</strong></p>
+                        <p>You have been specifically selected to participate in: <strong>{survey_title}</strong></p>
+                        <p>Assigned{assigned_by_text}</p>
+                    </div>
+                    
+                    <div class="survey-details">
+                        <h3 style="color: #155724; margin-top: 0;">📊 Survey Access Information</h3>
+                        <ul style="list-style-type: none; padding-left: 0;">
+                            <li><strong>📋 Survey:</strong> {survey_title}</li>
+                            <li><strong>👤 Username:</strong> {username}</li>
+                            <li><strong>🔑 Survey Code:</strong> <code style="background: #f0f0f0; padding: 2px 6px; border-radius: 4px; font-family: monospace;">{survey_code}</code></li>
+                            <li><strong>🌐 Platform:</strong> <a href="http://www.saurara.org" style="color: #28a745;">www.saurara.org</a></li>
+                        </ul>
+                    </div>
+                    
+                    <div class="steps">
+                        <h3 style="color: #856404; margin-top: 0;">📝 How to Access Your Survey</h3>
+                        <ol>
+                            <li><strong>Visit</strong> <a href="http://www.saurara.org" style="color: #28a745;">www.saurara.org</a></li>
+                            <li><strong>Click</strong> on "Survey Access" or "Login"</li>
+                            <li><strong>Enter</strong> your survey code: <code style="background: #f0f0f0; padding: 2px 6px; border-radius: 4px; font-family: monospace;">{survey_code}</code></li>
+                            <li><strong>Complete</strong> the survey at your convenience</li>
+                            <li><strong>Submit</strong> your responses when finished</li>
+                        </ol>
+                    </div>
+                    
+                    <div style="background: #d1ecf1; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #17a2b8;">
+                        <h3 style="color: #0c5460; margin-top: 0;">⏱️ Survey Information</h3>
+                        <ul style="margin: 0;">
+                            <li><strong>Estimated time:</strong> 15-20 minutes</li>
+                            <li><strong>Progress saving:</strong> Available (you can return later)</li>
+                            <li><strong>Confidentiality:</strong> All responses are secure and confidential</li>
+                            <li><strong>Support:</strong> Help available if needed</li>
+                        </ul>
+                    </div>
+                    
+                    <div style="text-align: center; margin: 30px 0;">
+                        <a href="http://www.saurara.org" class="button" style="color: white; text-decoration: none;">🚀 Access Survey Now</a>
+                    </div>
+                    
+                    <div style="background: #fff3cd; padding: 15px; border-radius: 8px; border-left: 4px solid #ffc107;">
+                        <p style="margin: 0;"><strong>🌟 Why Your Participation Matters:</strong></p>
+                        <p style="margin: 5px 0 0 0;">Your responses contribute to meaningful research that helps improve educational initiatives and community programs. Every answer you provide helps us better understand the needs and challenges in your field.</p>
+                    </div>
+                </div>
+                
+                <div class="footer">
+                    <p style="margin: 0; text-align: center; color: #6c757d; font-size: 14px;">
+                        <strong>🆘 Need Help?</strong><br>
+                        Contact our support team if you have questions or technical difficulties.<br>
+                        <strong>🌐 Platform:</strong> <a href="http://www.saurara.org" style="color: #28a745; font-weight: 600; text-decoration: none;">www.saurara.org</a> | 
+                        <strong>📧 Support:</strong> <a href="mailto:support@saurara.org" style="color: #28a745; font-weight: 600; text-decoration: none;">support@saurara.org</a>
+                    </p>
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+        
+        # Send the email
+        response = ses_client.send_email(
+            Source=os.getenv('SES_VERIFIED_EMAIL', 'noreply@saurara.org'),
+            Destination={'ToAddresses': [to_email]},
+            Message={
+                'Subject': {'Data': subject, 'Charset': 'UTF-8'},
+                'Body': {
+                    'Text': {'Data': body_text, 'Charset': 'UTF-8'},
+                    'Html': {'Data': body_html, 'Charset': 'UTF-8'}
+                }
+            }
+        )
+        
+        logger.info(f"Survey assignment email sent successfully via SES API to {to_email}")
+        return {
+            'success': True,
+            'method': 'SES API',
+            'message': 'Survey assignment email sent successfully via SES API',
+            'message_id': response['MessageId']
+        }
+        
+    except Exception as e:
+        logger.error(f"Error sending survey assignment email via SES API: {str(e)}")
+        logger.warning("SES API failed, trying SMTP method as fallback...")
+        return send_survey_assignment_email_smtp(to_email, username, survey_code, firstname, organization_name, survey_name, assigned_by)
+
+def send_survey_assignment_email_smtp(to_email, username, survey_code, firstname=None, organization_name=None, survey_name=None, assigned_by=None):
+    """Send survey assignment email using SMTP"""
+    try:
+        # Get SMTP credentials from environment
+        smtp_username = os.getenv('SES_SMTP_USERNAME')
+        smtp_password = os.getenv('SES_SMTP_PASSWORD')
+        smtp_host = os.getenv('SES_SMTP_HOST', 'email-smtp.us-east-1.amazonaws.com')
+        smtp_port = int(os.getenv('SES_SMTP_PORT', '587'))
+        source_email = os.getenv('SES_VERIFIED_EMAIL', 'noreply@saurara.org')
+        
+        if not smtp_username or not smtp_password:
+            raise Exception("SMTP credentials not found in environment variables")
+        
+        # Email content
+        subject = f"📋 New Survey Assignment: {survey_name or 'Survey'}"
+        greeting = f"Dear {firstname}" if firstname else f"Dear {username}"
+        org_text = f" from {organization_name}" if organization_name else ""
+        assigned_by_text = f" by {assigned_by}" if assigned_by else " by your administrator"
+        survey_title = survey_name or "New Survey"
+        
+        body_text = f"""{greeting},
+
+We're pleased to inform you that you have been assigned a new survey{org_text} on the Saurara Platform!
+
+📋 Survey Assignment Details:
+• Survey: {survey_title}
+• Assigned{assigned_by_text}
+• Username: {username}
+• Survey Code: {survey_code}
+• Survey Link: www.saurara.org
+
+🎯 About This Survey:
+You have been specifically selected to participate in this important research initiative. Your insights and experiences are valuable to understanding and improving educational and community programs.
+
+📝 How to Access Your Survey:
+1. Visit www.saurara.org
+2. Click on "Survey Access" or "Login"
+3. Enter your survey code: {survey_code}
+4. Complete the survey at your convenience
+5. Submit your responses when finished
+
+⏱️ Survey Information:
+• Estimated completion time: 15-20 minutes
+• You can save your progress and return later
+• All responses are confidential and secure
+• Your participation is greatly appreciated
+
+🌟 Why Your Participation Matters:
+Your responses contribute to meaningful research that helps improve educational initiatives and community programs. Every answer you provide helps us better understand the needs and challenges in your field.
+
+Need Help?
+If you have any questions about the survey or experience technical difficulties, please don't hesitate to contact our support team. We're here to ensure you have a smooth experience.
+
+Thank you for your time and valuable contribution to this research!
+
+Best regards,
+The Saurara Research Team
+
+---
+Survey Platform: www.saurara.org | Support: support@saurara.org"""
+
+        body_html = f"""
+        <html>
+        <head>
+            <style>
+                body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; line-height: 1.6; color: #333; }}
+                .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+                .header {{ background: linear-gradient(135deg, #28a745 0%, #20c997 100%); color: white; padding: 30px 20px; text-align: center; border-radius: 10px 10px 0 0; }}
+                .content {{ background: #ffffff; padding: 30px; border: 1px solid #e0e0e0; }}
+                .footer {{ background: #f8f9fa; padding: 20px; border-radius: 0 0 10px 10px; border: 1px solid #e0e0e0; border-top: none; }}
+                .highlight {{ background: #e8f5e8; padding: 15px; border-left: 4px solid #28a745; margin: 20px 0; }}
+                .survey-details {{ background: #f0f8ff; padding: 20px; border-radius: 8px; margin: 20px 0; }}
+                .button {{ display: inline-block; background: #28a745; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold; margin: 10px 0; }}
+                .steps {{ background: #fff9e6; padding: 20px; border-radius: 8px; margin: 20px 0; }}
+                .steps ol {{ margin: 0; padding-left: 20px; }}
+                .steps li {{ margin: 8px 0; }}
+                .assignment-tag {{ background: #28a745; color: white; padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: bold; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <h1 style="margin: 0; font-size: 28px;">📋 New Survey Assignment</h1>
+                    <p style="margin: 10px 0 0 0; font-size: 16px; opacity: 0.9;">Saurara Research Platform</p>
+                    <span class="assignment-tag">NEW ASSIGNMENT</span>
+                </div>
+                
+                <div class="content">
+                    <p style="font-size: 18px; margin-bottom: 20px;">{greeting},</p>
+                    
+                    <p>We're pleased to inform you that you have been assigned a new survey{org_text} on the Saurara Platform!</p>
+                    
+                    <div class="highlight">
+                        <p><strong>🎯 Survey Assignment</strong></p>
+                        <p>You have been specifically selected to participate in: <strong>{survey_title}</strong></p>
+                        <p>Assigned{assigned_by_text}</p>
+                    </div>
+                    
+                    <div class="survey-details">
+                        <h3 style="color: #155724; margin-top: 0;">📊 Survey Access Information</h3>
+                        <ul style="list-style-type: none; padding-left: 0;">
+                            <li><strong>📋 Survey:</strong> {survey_title}</li>
+                            <li><strong>👤 Username:</strong> {username}</li>
+                            <li><strong>🔑 Survey Code:</strong> <code style="background: #f0f0f0; padding: 2px 6px; border-radius: 4px; font-family: monospace;">{survey_code}</code></li>
+                            <li><strong>🌐 Platform:</strong> <a href="http://www.saurara.org" style="color: #28a745;">www.saurara.org</a></li>
+                        </ul>
+                    </div>
+                    
+                    <div class="steps">
+                        <h3 style="color: #856404; margin-top: 0;">📝 How to Access Your Survey</h3>
+                        <ol>
+                            <li><strong>Visit</strong> <a href="http://www.saurara.org" style="color: #28a745;">www.saurara.org</a></li>
+                            <li><strong>Click</strong> on "Survey Access" or "Login"</li>
+                            <li><strong>Enter</strong> your survey code: <code style="background: #f0f0f0; padding: 2px 6px; border-radius: 4px; font-family: monospace;">{survey_code}</code></li>
+                            <li><strong>Complete</strong> the survey at your convenience</li>
+                            <li><strong>Submit</strong> your responses when finished</li>
+                        </ol>
+                    </div>
+                    
+                    <div style="background: #d1ecf1; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #17a2b8;">
+                        <h3 style="color: #0c5460; margin-top: 0;">⏱️ Survey Information</h3>
+                        <ul style="margin: 0;">
+                            <li><strong>Estimated time:</strong> 15-20 minutes</li>
+                            <li><strong>Progress saving:</strong> Available (you can return later)</li>
+                            <li><strong>Confidentiality:</strong> All responses are secure and confidential</li>
+                            <li><strong>Support:</strong> Help available if needed</li>
+                        </ul>
+                    </div>
+                    
+                    <div style="text-align: center; margin: 30px 0;">
+                        <a href="http://www.saurara.org" class="button" style="color: white; text-decoration: none;">🚀 Access Survey Now</a>
+                    </div>
+                    
+                    <div style="background: #fff3cd; padding: 15px; border-radius: 8px; border-left: 4px solid #ffc107;">
+                        <p style="margin: 0;"><strong>🌟 Why Your Participation Matters:</strong></p>
+                        <p style="margin: 5px 0 0 0;">Your responses contribute to meaningful research that helps improve educational initiatives and community programs. Every answer you provide helps us better understand the needs and challenges in your field.</p>
+                    </div>
+                </div>
+                
+                <div class="footer">
+                    <p style="margin: 0; text-align: center; color: #6c757d; font-size: 14px;">
+                        <strong>🆘 Need Help?</strong><br>
+                        Contact our support team if you have questions or technical difficulties.<br>
+                        <strong>🌐 Platform:</strong> <a href="http://www.saurara.org" style="color: #28a745; font-weight: 600; text-decoration: none;">www.saurara.org</a> | 
+                        <strong>📧 Support:</strong> <a href="mailto:support@saurara.org" style="color: #28a745; font-weight: 600; text-decoration: none;">support@saurara.org</a>
+                    </p>
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+        
+        # Create message
+        msg = MIMEMultipart('alternative')
+        msg['Subject'] = subject
+        msg['From'] = source_email
+        msg['To'] = to_email
+        
+        # Create the plain-text and HTML version of your message
+        text_part = MIMEText(body_text, 'plain')
+        html_part = MIMEText(body_html, 'html')
+        
+        # Add HTML/plain-text parts to MIMEMultipart message
+        msg.attach(text_part)
+        msg.attach(html_part)
+        
+        # Send the email
+        with smtplib.SMTP(smtp_host, smtp_port) as server:
+            server.starttls()
+            server.login(smtp_username, smtp_password)
+            server.sendmail(source_email, to_email, msg.as_string())
+        
+        logger.info(f"Survey assignment email sent successfully via SMTP to {to_email}")
+        return {
+            'success': True,
+            'method': 'SMTP',
+            'message': 'Survey assignment email sent successfully via SMTP'
+        }
+        
+    except Exception as e:
+        logger.error(f"Error sending survey assignment email via SMTP: {str(e)}")
+        return {
+            'success': False,
+            'error': f"SMTP survey assignment email sending failed: {str(e)}"
+        }
 
 def send_reminder_email_smtp(to_email, username, survey_code, firstname=None, organization_name=None, days_remaining=None):
     """Send reminder email using SMTP"""
@@ -5474,6 +5834,260 @@ def get_analytics_overview():
     except Exception as e:
         logger.error(f"Error fetching analytics overview: {str(e)}")
         return jsonify({'error': f'Failed to fetch analytics overview: {str(e)}'}), 500
+
+# Survey Assignment API Endpoints
+@app.route('/api/assign-survey', methods=['POST'])
+def assign_survey_to_user():
+    """Assign a survey to existing user(s) and send email notifications"""
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'No data provided'}), 400
+        
+        # Required fields
+        user_ids = data.get('user_ids', [])
+        template_id = data.get('template_id')
+        
+        if not user_ids or not template_id:
+            return jsonify({'error': 'user_ids and template_id are required'}), 400
+        
+        # Validate template exists
+        template = SurveyTemplate.query.get(template_id)
+        if not template:
+            return jsonify({'error': 'Survey template not found'}), 404
+        
+        # Get admin info for email
+        admin_user = None
+        admin_name = "Administrator"
+        if 'admin_id' in data:
+            admin_user = User.query.get(data['admin_id'])
+            if admin_user:
+                admin_name = f"{admin_user.firstname} {admin_user.lastname}".strip() or admin_user.username
+        
+        results = {
+            'total_users': len(user_ids),
+            'successful_assignments': 0,
+            'failed_assignments': 0,
+            'successful_emails': 0,
+            'failed_emails': 0,
+            'details': []
+        }
+        
+        for user_id in user_ids:
+            user_result = {
+                'user_id': user_id,
+                'assignment_success': False,
+                'email_success': False,
+                'assignment_error': None,
+                'email_error': None
+            }
+            
+            try:
+                # Get user
+                user = User.query.get(user_id)
+                if not user:
+                    user_result['assignment_error'] = 'User not found'
+                    results['details'].append(user_result)
+                    results['failed_assignments'] += 1
+                    continue
+                
+                # Generate unique survey code for this assignment
+                survey_code = str(uuid.uuid4())
+                
+                # Create survey response record
+                survey_response = SurveyResponse(
+                    template_id=template_id,
+                    user_id=user_id,
+                    answers={},
+                    status='pending',
+                    survey_code=survey_code,
+                    start_date=None,
+                    end_date=None
+                )
+                
+                db.session.add(survey_response)
+                db.session.flush()  # Get the ID but don't commit yet
+                
+                user_result['assignment_success'] = True
+                user_result['survey_response_id'] = survey_response.id
+                user_result['survey_code'] = survey_code
+                results['successful_assignments'] += 1
+                
+                # Send assignment email
+                try:
+                    email_result = send_survey_assignment_email(
+                        to_email=user.email,
+                        username=user.username,
+                        survey_code=survey_code,
+                        firstname=user.firstname,
+                        organization_name=user.organization.name if user.organization else None,
+                        survey_name=template.version.name if template.version else "Survey",
+                        assigned_by=admin_name
+                    )
+                    
+                    if email_result.get('success'):
+                        user_result['email_success'] = True
+                        results['successful_emails'] += 1
+                        logger.info(f"Survey assignment email sent to user {user_id}: {user.email}")
+                    else:
+                        user_result['email_error'] = email_result.get('error', 'Unknown email error')
+                        results['failed_emails'] += 1
+                        logger.error(f"Failed to send assignment email to user {user_id}: {user_result['email_error']}")
+                
+                except Exception as email_error:
+                    user_result['email_error'] = str(email_error)
+                    results['failed_emails'] += 1
+                    logger.error(f"Exception sending assignment email to user {user_id}: {str(email_error)}")
+                
+            except Exception as assignment_error:
+                user_result['assignment_error'] = str(assignment_error)
+                results['failed_assignments'] += 1
+                logger.error(f"Exception assigning survey to user {user_id}: {str(assignment_error)}")
+                db.session.rollback()
+                continue
+            
+            results['details'].append(user_result)
+        
+        # Commit all successful assignments
+        try:
+            db.session.commit()
+            logger.info(f"Survey assignment completed: {results['successful_assignments']} assignments, {results['successful_emails']} emails sent")
+        except Exception as commit_error:
+            db.session.rollback()
+            logger.error(f"Failed to commit survey assignments: {str(commit_error)}")
+            return jsonify({'error': f'Failed to save assignments: {str(commit_error)}'}), 500
+        
+        # Calculate success rates
+        assignment_success_rate = (results['successful_assignments'] / results['total_users'] * 100) if results['total_users'] > 0 else 0
+        email_success_rate = (results['successful_emails'] / results['total_users'] * 100) if results['total_users'] > 0 else 0
+        
+        return jsonify({
+            'message': f'Survey assignment completed: {results["successful_assignments"]}/{results["total_users"]} assignments, {results["successful_emails"]}/{results["total_users"]} emails sent',
+            'assignment_success_rate': round(assignment_success_rate, 1),
+            'email_success_rate': round(email_success_rate, 1),
+            'template_name': template.version.name if template.version else "Survey",
+            'assigned_by': admin_name,
+            'results': results
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error in survey assignment endpoint: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': f'Failed to assign survey: {str(e)}'}), 500
+
+@app.route('/api/users/<int:user_id>/survey-assignments', methods=['GET'])
+def get_user_survey_assignments(user_id):
+    """Get all survey assignments for a specific user"""
+    try:
+        # Verify user exists
+        user = User.query.get_or_404(user_id)
+        
+        # Get all survey responses for this user with eager loading of relationships
+        assignments = db.session.query(SurveyResponse)\
+            .options(db.joinedload(SurveyResponse.template)\
+                      .joinedload(SurveyTemplate.version))\
+            .filter_by(user_id=user_id).all()
+        
+        logger.info(f"Found {len(assignments)} assignments for user {user_id}")
+        
+        result = []
+        for assignment in assignments:
+            try:
+                template_name = "Survey"  # Default name
+                if assignment.template:
+                    if assignment.template.version:
+                        template_name = assignment.template.version.name
+                    else:
+                        template_name = f"Template {assignment.template.id}"
+                        logger.warning(f"Template {assignment.template.id} has no version")
+                else:
+                    logger.warning(f"Assignment {assignment.id} has no template")
+                
+                assignment_data = {
+                    'id': assignment.id,
+                    'template_id': assignment.template_id,
+                    'template_name': template_name,
+                    'survey_code': assignment.survey_code,
+                    'status': assignment.status,
+                    'created_at': assignment.created_at.isoformat() if assignment.created_at else None,
+                    'start_date': assignment.start_date.isoformat() if assignment.start_date else None,
+                    'end_date': assignment.end_date.isoformat() if assignment.end_date else None,
+                    'updated_at': assignment.updated_at.isoformat() if assignment.updated_at else None
+                }
+                result.append(assignment_data)
+                logger.info(f"Added assignment {assignment.id} with template name: {template_name}")
+            except Exception as inner_e:
+                logger.error(f"Error processing assignment {assignment.id}: {str(inner_e)}")
+                continue
+        
+        response_data = {
+            'user_id': user_id,
+            'username': user.username,
+            'email': user.email,
+            'total_assignments': len(result),
+            'assignments': result
+        }
+        
+        logger.info(f"Returning {len(result)} assignments for user {user_id}")
+        return jsonify(response_data), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting user survey assignments: {str(e)}")
+        return jsonify({'error': f'Failed to get user survey assignments: {str(e)}'}), 500
+
+@app.route('/api/test/survey-assignments', methods=['GET'])
+def test_survey_assignments():
+    """Test endpoint to check survey assignments in database"""
+    try:
+        # Get all survey responses
+        all_assignments = SurveyResponse.query.all()
+        
+        # Get all users
+        all_users = User.query.all()
+        
+        # Get all templates
+        all_templates = SurveyTemplate.query.all()
+        
+        result = {
+            'total_assignments': len(all_assignments),
+            'total_users': len(all_users),
+            'total_templates': len(all_templates),
+            'assignments': [],
+            'users_sample': [],
+            'templates_sample': []
+        }
+        
+        # Add sample assignments
+        for assignment in all_assignments[:5]:  # First 5
+            result['assignments'].append({
+                'id': assignment.id,
+                'user_id': assignment.user_id,
+                'template_id': assignment.template_id,
+                'status': assignment.status,
+                'created_at': assignment.created_at.isoformat() if assignment.created_at else None
+            })
+        
+        # Add sample users
+        for user in all_users[:5]:  # First 5
+            result['users_sample'].append({
+                'id': user.id,
+                'username': user.username,
+                'email': user.email
+            })
+        
+        # Add sample templates
+        for template in all_templates[:5]:  # First 5
+            result['templates_sample'].append({
+                'id': template.id,
+                'survey_code': template.survey_code
+            })
+        
+        return jsonify(result), 200
+        
+    except Exception as e:
+        logger.error(f"Error in test endpoint: {str(e)}")
+        return jsonify({'error': f'Test failed: {str(e)}'}), 500
 
 if __name__ == '__main__':
     app.run(debug=True)
