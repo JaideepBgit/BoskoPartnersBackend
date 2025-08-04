@@ -1321,7 +1321,7 @@ if env_user and env_password and env_host and env_name:
 if not db_url:
     # Local defaults
     local_db_user     = 'root'
-    local_db_password = 'jaideep'
+    local_db_password = 'rootroot'
     local_db_host     = 'localhost'
     local_db_port     = '3306'
     local_db_name     = 'boskopartnersdb'
@@ -2489,6 +2489,89 @@ def delete_template_question(template_id, question_id):
     db.session.commit()
     return jsonify({'deleted': True}), 200
 
+@app.route('/api/templates/<int:template_id>/copy', methods=['POST'])
+def copy_template_to_organization(template_id):
+    """Copy a template to another organization's template version"""
+    try:
+        data = request.get_json() or {}
+        required_keys = ['target_organization_id']
+        
+        if not all(k in data for k in required_keys):
+            return jsonify({'error': 'Missing required fields: target_organization_id'}), 400
+        
+        target_organization_id = data['target_organization_id']
+        target_version_name = data.get('target_version_name', 'Copied Templates')
+        new_survey_code = data.get('new_survey_code', '')
+        
+        # Get the source template
+        source_template = SurveyTemplate.query.get_or_404(template_id)
+        
+        # Verify target organization exists
+        target_organization = Organization.query.get(target_organization_id)
+        if not target_organization:
+            return jsonify({'error': 'Target organization not found'}), 404
+        
+        # Find or create a template version for the target organization
+        target_version = SurveyTemplateVersion.query.filter_by(
+            organization_id=target_organization_id,
+            name=target_version_name
+        ).first()
+        
+        if not target_version:
+            # Create a new template version for the target organization
+            target_version = SurveyTemplateVersion(
+                name=target_version_name,
+                description=f"Templates copied from {source_template.version.organization.name}",
+                organization_id=target_organization_id
+            )
+            db.session.add(target_version)
+            db.session.flush()  # Get the ID
+        
+        # Generate unique survey code if not provided
+        if not new_survey_code:
+            new_survey_code = f"{source_template.survey_code}_copy_to_{target_organization.name.lower().replace(' ', '_')}"
+        
+        # Ensure the survey code is unique
+        counter = 1
+        original_survey_code = new_survey_code
+        while True:
+            existing = SurveyTemplate.query.filter_by(survey_code=new_survey_code).first()
+            if not existing:
+                break
+            new_survey_code = f"{original_survey_code}_{counter}"
+            counter += 1
+        
+        # Create the copied template
+        copied_template = SurveyTemplate(
+            version_id=target_version.id,
+            survey_code=new_survey_code,
+            questions=source_template.questions,  # Deep copy of questions
+            sections=source_template.sections     # Deep copy of sections
+        )
+        
+        db.session.add(copied_template)
+        db.session.commit()
+        
+        logger.info(f"Template {template_id} copied to organization {target_organization_id} as template {copied_template.id}")
+        
+        return jsonify({
+            'success': True,
+            'copied_template': {
+                'id': copied_template.id,
+                'survey_code': copied_template.survey_code,
+                'version_id': copied_template.version_id,
+                'version_name': target_version.name,
+                'organization_id': target_organization_id,
+                'organization_name': target_organization.name
+            },
+            'message': f'Template successfully copied to {target_organization.name}'
+        }), 201
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error copying template {template_id}: {str(e)}")
+        return jsonify({'error': f'Failed to copy template: {str(e)}'}), 500
+
 # Survey Responses API Endpoints
 @app.route('/api/responses', methods=['GET'])
 def get_responses():
@@ -2783,7 +2866,7 @@ def initialize_organization_types():
         OrganizationType.query.delete()
         
         # Add the required types with proper capitalization
-        types = ['Church', 'School', 'Other', 'Institution', 'Non_formal_organizations']
+        types = ['CHURCH', 'School', 'OTHER', 'Institution', 'Non_formal_organizations']
         for type_name in types:
             org_type = OrganizationType(type=type_name)
             db.session.add(org_type)
@@ -2946,7 +3029,7 @@ def add_organization():
         org_type = None
         if data.get('type_id'):
             org_type = OrganizationType.query.get(data['type_id'])
-        create_survey_template = org_type and org_type.type in ['Church', 'Non_formal_organizations', 'Institution']
+        create_survey_template = org_type and org_type.type in ['CHURCH', 'Non_formal_organizations', 'Institution']
         
         # Handle geo location if provided
         geo_location_id = None
@@ -3749,7 +3832,113 @@ def update_template_version(version_id):
     
     return jsonify({'error': 'No valid fields to update'}), 400
 
-
+@app.route('/api/template-versions/<int:version_id>/copy', methods=['POST'])
+def copy_template_version_to_organization(version_id):
+    """Copy a template version and all its templates to another organization"""
+    try:
+        data = request.get_json() or {}
+        required_keys = ['target_organization_id']
+        
+        if not all(k in data for k in required_keys):
+            return jsonify({'error': 'Missing required fields: target_organization_id'}), 400
+        
+        target_organization_id = data['target_organization_id']
+        new_version_name = data.get('new_version_name', '')
+        
+        # Get the source template version
+        source_version = SurveyTemplateVersion.query.get_or_404(version_id)
+        
+        # Verify target organization exists
+        target_organization = Organization.query.get(target_organization_id)
+        if not target_organization:
+            return jsonify({'error': 'Target organization not found'}), 404
+        
+        # Prevent copying to the same organization
+        if source_version.organization_id == target_organization_id:
+            return jsonify({'error': 'Cannot copy template version to the same organization'}), 400
+        
+        # Generate new version name if not provided
+        if not new_version_name:
+            new_version_name = f"{source_version.name}_copy_from_{source_version.organization.name.lower().replace(' ', '_')}"
+        
+        # Ensure the version name is unique for the target organization
+        counter = 1
+        original_version_name = new_version_name
+        while True:
+            existing = SurveyTemplateVersion.query.filter_by(
+                organization_id=target_organization_id,
+                name=new_version_name
+            ).first()
+            if not existing:
+                break
+            new_version_name = f"{original_version_name}_{counter}"
+            counter += 1
+        
+        # Create the copied template version
+        copied_version = SurveyTemplateVersion(
+            name=new_version_name,
+            description=f"Copy of '{source_version.name}' from {source_version.organization.name}",
+            organization_id=target_organization_id
+        )
+        
+        db.session.add(copied_version)
+        db.session.flush()  # Get the ID
+        
+        # Get all templates in the source version
+        source_templates = SurveyTemplate.query.filter_by(version_id=version_id).all()
+        
+        copied_templates = []
+        for source_template in source_templates:
+            # Generate unique survey code for each template
+            new_survey_code = f"{source_template.survey_code}_copy_to_{target_organization.name.lower().replace(' ', '_')}"
+            
+            # Ensure the survey code is unique
+            template_counter = 1
+            original_survey_code = new_survey_code
+            while True:
+                existing_template = SurveyTemplate.query.filter_by(survey_code=new_survey_code).first()
+                if not existing_template:
+                    break
+                new_survey_code = f"{original_survey_code}_{template_counter}"
+                template_counter += 1
+            
+            # Create the copied template
+            copied_template = SurveyTemplate(
+                version_id=copied_version.id,
+                survey_code=new_survey_code,
+                questions=source_template.questions,  # Deep copy of questions
+                sections=source_template.sections     # Deep copy of sections
+            )
+            
+            db.session.add(copied_template)
+            copied_templates.append({
+                'original_id': source_template.id,
+                'original_survey_code': source_template.survey_code,
+                'new_survey_code': new_survey_code
+            })
+        
+        db.session.commit()
+        
+        logger.info(f"Template version {version_id} copied to organization {target_organization_id} as version {copied_version.id} with {len(copied_templates)} templates")
+        
+        return jsonify({
+            'success': True,
+            'copied_version': {
+                'id': copied_version.id,
+                'name': copied_version.name,
+                'description': copied_version.description,
+                'organization_id': target_organization_id,
+                'organization_name': target_organization.name,
+                'template_count': len(copied_templates)
+            },
+            'copied_templates': copied_templates,
+            'message': f'Template version successfully copied to {target_organization.name} with {len(copied_templates)} templates'
+        }), 201
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error copying template version {version_id}: {str(e)}")
+        return jsonify({'error': f'Failed to copy template version: {str(e)}'}), 500
 
 @app.route('/api/templates/<int:template_id>/sections', methods=['GET'])
 def get_template_sections(template_id):
@@ -4618,7 +4807,7 @@ def initialize_enhanced_data():
     try:
         # Initialize organization types
         OrganizationType.query.delete()
-        types = ['church', 'school', 'other', 'institution', 'non-formal organization']
+        types = ['CHURCH', 'School', 'OTHER', 'Institution', 'Non_formal_organizations']
         for type_name in types:
             org_type = OrganizationType(type=type_name)
             db.session.add(org_type)
@@ -4639,7 +4828,7 @@ def initialize_enhanced_data():
         db.session.flush()
         
         # Create sample organization
-        church_type = OrganizationType.query.filter_by(type='church').first()
+        church_type = OrganizationType.query.filter_by(type='CHURCH').first()
         sample_org = Organization(
             name='Sample Church Organization',
             type=church_type.id,  # Maps to new 'type' column
@@ -5405,9 +5594,9 @@ def initialize_survey_data():
             }), 200
         
         # 1. Create organization types if they don't exist
-        church_type = OrganizationType.query.filter_by(type='Church').first()
+        church_type = OrganizationType.query.filter_by(type='CHURCH').first()
         if not church_type:
-            church_type = OrganizationType(type='Church')
+            church_type = OrganizationType(type='CHURCH')
             db.session.add(church_type)
             db.session.flush()
         
