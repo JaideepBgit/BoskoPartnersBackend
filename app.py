@@ -1676,6 +1676,39 @@ class ReportTemplate(db.Model):
         return f'<ReportTemplate {self.id}: {self.name}>'
 
 
+class EmailTemplate(db.Model):
+    __tablename__ = 'email_templates'
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(255), nullable=False)
+    subject = db.Column(db.String(255), nullable=False)
+    html_body = db.Column(db.Text, nullable=False)
+    text_body = db.Column(db.Text, nullable=True)
+    created_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    is_public = db.Column(db.Boolean, default=False)
+    created_at = db.Column(db.DateTime, server_default=db.func.current_timestamp())
+    updated_at = db.Column(db.DateTime, server_default=db.func.current_timestamp(), onupdate=db.func.current_timestamp())
+
+    # Relationships
+    creator = db.relationship('User', backref=db.backref('email_templates', lazy=True))
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'name': self.name,
+            'subject': self.subject,
+            'html_body': self.html_body,
+            'text_body': self.text_body,
+            'created_by': self.created_by,
+            'is_public': self.is_public,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+            'creator_name': f"{self.creator.firstname} {self.creator.lastname}" if self.creator else "Unknown"
+        }
+
+    def __repr__(self):
+        return f'<EmailTemplate {self.id}: {self.name}>'
+
+
 # Routes
 
 @app.route('/')
@@ -5941,6 +5974,92 @@ def delete_report_template(template_id):
         db.session.rollback()
         logger.error(f"Error deleting report template: {str(e)}")
         return jsonify({'error': f'Failed to delete template: {str(e)}'}), 500
+
+
+# ---------- Email Templates CRUD Endpoints ----------
+@app.route('/api/email-templates', methods=['GET'])
+def get_email_templates():
+    """Get email templates (public or created by user)"""
+    try:
+        user_id = request.args.get('user_id')
+        if user_id:
+            templates = EmailTemplate.query.filter(
+                db.or_(EmailTemplate.is_public == True, EmailTemplate.created_by == user_id)
+            ).order_by(EmailTemplate.created_at.desc()).all()
+        else:
+            templates = EmailTemplate.query.filter_by(is_public=True).order_by(EmailTemplate.created_at.desc()).all()
+        return jsonify({'success': True, 'templates': [t.to_dict() for t in templates]}), 200
+    except Exception as e:
+        logger.error(f"Error fetching email templates: {str(e)}")
+        return jsonify({'error': f'Failed to fetch templates: {str(e)}'}), 500
+
+
+@app.route('/api/email-templates', methods=['POST'])
+def save_email_template():
+    """Create a new email template"""
+    try:
+        data = request.get_json() or {}
+        name = data.get('name')
+        subject = data.get('subject')
+        html_body = data.get('html_body')
+        text_body = data.get('text_body', '')
+        created_by = data.get('created_by')
+        is_public = data.get('is_public', False)
+
+        if not all([name, subject, html_body, created_by]):
+            return jsonify({'error': 'name, subject, html_body and created_by are required'}), 400
+
+        template = EmailTemplate(
+            name=name,
+            subject=subject,
+            html_body=html_body,
+            text_body=text_body,
+            created_by=created_by,
+            is_public=is_public
+        )
+        db.session.add(template)
+        db.session.commit()
+        return jsonify({'success': True, 'template': template.to_dict()}), 201
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error saving email template: {str(e)}")
+        return jsonify({'error': f'Failed to save template: {str(e)}'}), 500
+
+
+@app.route('/api/email-templates/<int:template_id>', methods=['PUT'])
+def update_email_template(template_id):
+    """Update an existing email template"""
+    try:
+        template = EmailTemplate.query.get_or_404(template_id)
+        data = request.get_json() or {}
+
+        template.name = data.get('name', template.name)
+        template.subject = data.get('subject', template.subject)
+        template.html_body = data.get('html_body', template.html_body)
+        template.text_body = data.get('text_body', template.text_body)
+        template.is_public = data.get('is_public', template.is_public)
+
+        db.session.commit()
+        return jsonify({'success': True, 'template': template.to_dict()}), 200
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error updating email template: {str(e)}")
+        return jsonify({'error': f'Failed to update template: {str(e)}'}), 500
+
+
+@app.route('/api/email-templates/<int:template_id>', methods=['DELETE'])
+def delete_email_template(template_id):
+    """Delete an email template"""
+    try:
+        template = EmailTemplate.query.get_or_404(template_id)
+        db.session.delete(template)
+        db.session.commit()
+        return jsonify({'success': True, 'message': 'Template deleted successfully'}), 200
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error deleting email template: {str(e)}")
+        return jsonify({'error': f'Failed to delete template: {str(e)}'}), 500
+
 
 @app.route('/api/reports/export', methods=['POST'])
 def export_report():
