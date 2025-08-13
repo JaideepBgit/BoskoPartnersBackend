@@ -1680,16 +1680,16 @@ class EmailTemplate(db.Model):
     __tablename__ = 'email_templates'
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(255), nullable=False)
-    subject = db.Column(db.String(255), nullable=False)
-    html_body = db.Column(db.Text, nullable=False)
+    subject = db.Column(db.String(255), nullable=True)
+    html_body = db.Column(db.Text, nullable=True)
     text_body = db.Column(db.Text, nullable=True)
-    created_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    organization_id = db.Column(db.Integer, db.ForeignKey('organizations.id'), nullable=False)
     is_public = db.Column(db.Boolean, default=False)
     created_at = db.Column(db.DateTime, server_default=db.func.current_timestamp())
     updated_at = db.Column(db.DateTime, server_default=db.func.current_timestamp(), onupdate=db.func.current_timestamp())
 
     # Relationships
-    creator = db.relationship('User', backref=db.backref('email_templates', lazy=True))
+    organization = db.relationship('Organization', backref=db.backref('email_templates', lazy=True))
 
     def to_dict(self):
         return {
@@ -1698,11 +1698,10 @@ class EmailTemplate(db.Model):
             'subject': self.subject,
             'html_body': self.html_body,
             'text_body': self.text_body,
-            'created_by': self.created_by,
+            'organization_id': self.organization_id,
             'is_public': self.is_public,
             'created_at': self.created_at.isoformat() if self.created_at else None,
-            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
-            'creator_name': f"{self.creator.firstname} {self.creator.lastname}" if self.creator else "Unknown"
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None
         }
 
     def __repr__(self):
@@ -1881,17 +1880,18 @@ def get_user_details_status(user_id):
         # Check if personal details are filled (first name and last name are required)
         personal_filled = False
         organizational_filled = False
-        
+
         if details.form_data and 'personal' in details.form_data:
             personal = details.form_data['personal']
             if personal.get('firstName') and personal.get('lastName'):
                 personal_filled = True
-        
+
         if details.form_data and 'organizational' in details.form_data:
             org = details.form_data['organizational']
-            if (org.get('country') and org.get('region') and 
-                org.get('church') and org.get('school')):
-                organizational_filled = True
+            # Support legacy shape (region/church/school) and new form shape (province/city/address_line1)
+            legacy_ok = bool(org.get('country') and org.get('region') and org.get('church') and org.get('school'))
+            newform_ok = bool(org.get('country') and org.get('province') and org.get('city') and org.get('address_line1'))
+            organizational_filled = legacy_ok or newform_ok
         
         # Return status information
         return jsonify({
@@ -2623,14 +2623,15 @@ def get_responses():
 
 @app.route('/api/templates/<int:template_id>/responses', methods=['POST'])
 def add_response(template_id):
+    """Create or update a survey response (Save Draft should update existing)."""
     data = request.get_json() or {}
     if 'user_id' not in data or 'answers' not in data:
         return jsonify({'error': 'Missing required fields'}), 400
-    
+
     # Parse date fields if provided
     start_date = None
     end_date = None
-    
+
     if data.get('start_date'):
         try:
             start_date = datetime.fromisoformat(data['start_date'].replace('Z', '+00:00'))
@@ -2639,7 +2640,7 @@ def add_response(template_id):
                 start_date = datetime.strptime(data['start_date'], '%Y-%m-%d')
             except ValueError:
                 return jsonify({'error': 'Invalid start_date format'}), 400
-    
+
     if data.get('end_date'):
         try:
             end_date = datetime.fromisoformat(data['end_date'].replace('Z', '+00:00'))
@@ -2648,7 +2649,31 @@ def add_response(template_id):
                 end_date = datetime.strptime(data['end_date'], '%Y-%m-%d')
             except ValueError:
                 return jsonify({'error': 'Invalid end_date format'}), 400
-    
+
+    # Check if a response already exists for this user and template
+    existing_response = SurveyResponse.query.filter_by(
+        template_id=template_id,
+        user_id=data['user_id']
+    ).first()
+
+    if existing_response:
+        # Update existing response (Save Draft behavior)
+        existing_response.answers = data['answers']
+        if 'status' in data and data['status']:
+            existing_response.status = data['status']
+        if start_date is not None:
+            existing_response.start_date = start_date
+        if end_date is not None:
+            existing_response.end_date = end_date
+        db.session.commit()
+        return jsonify({
+            'id': existing_response.id,
+            'status': existing_response.status,
+            'start_date': existing_response.start_date.isoformat() if existing_response.start_date else None,
+            'end_date': existing_response.end_date.isoformat() if existing_response.end_date else None
+        }), 200
+
+    # Otherwise create a new response
     response = SurveyResponse(
         template_id=template_id,
         user_id=data['user_id'],
@@ -5981,10 +6006,10 @@ def delete_report_template(template_id):
 def get_email_templates():
     """Get email templates (public or created by user)"""
     try:
-        user_id = request.args.get('user_id')
-        if user_id:
+        organization_id = request.args.get('organization_id')
+        if organization_id:
             templates = EmailTemplate.query.filter(
-                db.or_(EmailTemplate.is_public == True, EmailTemplate.created_by == user_id)
+                db.or_(EmailTemplate.is_public == True, EmailTemplate.organization_id == organization_id)
             ).order_by(EmailTemplate.created_at.desc()).all()
         else:
             templates = EmailTemplate.query.filter_by(is_public=True).order_by(EmailTemplate.created_at.desc()).all()
@@ -6003,18 +6028,18 @@ def save_email_template():
         subject = data.get('subject')
         html_body = data.get('html_body')
         text_body = data.get('text_body', '')
-        created_by = data.get('created_by')
+        organization_id = data.get('organization_id')
         is_public = data.get('is_public', False)
 
-        if not all([name, subject, html_body, created_by]):
-            return jsonify({'error': 'name, subject, html_body and created_by are required'}), 400
+        if not all([name, subject, html_body, organization_id]):
+            return jsonify({'error': 'name, subject, html_body and organization_id are required'}), 400
 
         template = EmailTemplate(
             name=name,
             subject=subject,
             html_body=html_body,
             text_body=text_body,
-            created_by=created_by,
+            organization_id=organization_id,
             is_public=is_public
         )
         db.session.add(template)
@@ -6038,6 +6063,8 @@ def update_email_template(template_id):
         template.html_body = data.get('html_body', template.html_body)
         template.text_body = data.get('text_body', template.text_body)
         template.is_public = data.get('is_public', template.is_public)
+        if 'organization_id' in data and data.get('organization_id'):
+            template.organization_id = data.get('organization_id')
 
         db.session.commit()
         return jsonify({'success': True, 'template': template.to_dict()}), 200
