@@ -24,7 +24,9 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
-load_dotenv()
+# Ensure .env values override any existing environment variables and are resolved
+# relative to this file's directory, so local edits take effect on reloads.
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '.env'), override=True)
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
