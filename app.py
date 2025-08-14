@@ -1719,7 +1719,7 @@ class ReportTemplate(db.Model):
     def __repr__(self):
         return f'<ReportTemplate {self.id}: {self.name}>'
 
-
+"""
 class EmailTemplate(db.Model):
     __tablename__ = 'email_templates'
     id = db.Column(db.Integer, primary_key=True)
@@ -1750,7 +1750,7 @@ class EmailTemplate(db.Model):
 
     def __repr__(self):
         return f'<EmailTemplate {self.id}: {self.name}>'
-
+"""
 
 # Routes
 
