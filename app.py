@@ -553,13 +553,15 @@ The Saurara Research Team
         logger.warning("SES API failed, trying SMTP method as fallback...")
         return send_welcome_email_smtp(to_email, username, password, firstname, survey_code)
 
-def send_survey_assignment_email(to_email, username, survey_code, firstname=None, organization_name=None, survey_name=None, assigned_by=None):
-    """Send survey assignment email to user (tries SES API first, falls back to SMTP)"""
+def send_survey_assignment_email(to_email, username, password, survey_code, firstname=None, organization_name=None, survey_name=None, assigned_by=None):
+    """Send survey assignment email to user (tries SES API first, falls back to SMTP).
+    Includes user's existing password and survey code from users table.
+    """
     try:
         ses_client = get_ses_client()
         if not ses_client:
             logger.warning("SES API client failed, trying SMTP method...")
-            return send_survey_assignment_email_smtp(to_email, username, survey_code, firstname, organization_name, survey_name, assigned_by)
+            return send_survey_assignment_email_smtp(to_email, username, password, survey_code, firstname, organization_name, survey_name, assigned_by)
         
         # Email content
         subject = f"📋 New Survey Assignment: {survey_name or 'Survey'}"
@@ -576,6 +578,7 @@ We're pleased to inform you that you have been assigned a new survey{org_text} o
 • Survey: {survey_title}
 • Assigned{assigned_by_text}
 • Username: {username}
+• Password: {password}
 • Survey Code: {survey_code}
 • Survey Link: www.saurara.org
 
@@ -651,6 +654,7 @@ Survey Platform: www.saurara.org | Support: support@saurara.org"""
                         <ul style="list-style-type: none; padding-left: 0;">
                             <li><strong>📋 Survey:</strong> {survey_title}</li>
                             <li><strong>👤 Username:</strong> {username}</li>
+                            <li><strong>🔑 Password:</strong> <code style="background: #f0f0f0; padding: 2px 6px; border-radius: 4px; font-family: monospace;">{password}</code></li>
                             <li><strong>🔑 Survey Code:</strong> <code style="background: #f0f0f0; padding: 2px 6px; border-radius: 4px; font-family: monospace;">{survey_code}</code></li>
                             <li><strong>🌐 Platform:</strong> <a href="http://www.saurara.org" style="color: #28a745;">www.saurara.org</a></li>
                         </ul>
@@ -724,10 +728,10 @@ Survey Platform: www.saurara.org | Support: support@saurara.org"""
     except Exception as e:
         logger.error(f"Error sending survey assignment email via SES API: {str(e)}")
         logger.warning("SES API failed, trying SMTP method as fallback...")
-        return send_survey_assignment_email_smtp(to_email, username, survey_code, firstname, organization_name, survey_name, assigned_by)
+        return send_survey_assignment_email_smtp(to_email, username, password, survey_code, firstname, organization_name, survey_name, assigned_by)
 
-def send_survey_assignment_email_smtp(to_email, username, survey_code, firstname=None, organization_name=None, survey_name=None, assigned_by=None):
-    """Send survey assignment email using SMTP"""
+def send_survey_assignment_email_smtp(to_email, username, password, survey_code, firstname=None, organization_name=None, survey_name=None, assigned_by=None):
+    """Send survey assignment email using SMTP (includes password and survey code)."""
     try:
         # Get SMTP credentials from environment
         smtp_username = os.getenv('SES_SMTP_USERNAME')
@@ -754,6 +758,7 @@ We're pleased to inform you that you have been assigned a new survey{org_text} o
 • Survey: {survey_title}
 • Assigned{assigned_by_text}
 • Username: {username}
+• Password: {password}
 • Survey Code: {survey_code}
 • Survey Link: www.saurara.org
 
@@ -829,6 +834,7 @@ Survey Platform: www.saurara.org | Support: support@saurara.org"""
                         <ul style="list-style-type: none; padding-left: 0;">
                             <li><strong>📋 Survey:</strong> {survey_title}</li>
                             <li><strong>👤 Username:</strong> {username}</li>
+                            <li><strong>🔑 Password:</strong> <code style="background: #f0f0f0; padding: 2px 6px; border-radius: 4px; font-family: monospace;">{password}</code></li>
                             <li><strong>🔑 Survey Code:</strong> <code style="background: #f0f0f0; padding: 2px 6px; border-radius: 4px; font-family: monospace;">{survey_code}</code></li>
                             <li><strong>🌐 Platform:</strong> <a href="http://www.saurara.org" style="color: #28a745;">www.saurara.org</a></li>
                         </ul>
@@ -1321,7 +1327,7 @@ if env_user and env_password and env_host and env_name:
 if not db_url:
     # Local defaults
     local_db_user     = 'root'
-    local_db_password = 'rootroot'
+    local_db_password = 'jaideep'
     local_db_host     = 'localhost'
     local_db_port     = '3306'
     local_db_name     = 'boskopartnersdb'
@@ -6226,8 +6232,10 @@ def assign_survey_to_user():
                     results['failed_assignments'] += 1
                     continue
                 
-                # Generate unique survey code for this assignment
-                survey_code = str(uuid.uuid4())
+                # Use existing user survey code if available; otherwise, generate one and save to user
+                survey_code = user.survey_code or str(uuid.uuid4())
+                if not user.survey_code:
+                    user.survey_code = survey_code
                 
                 # Create survey response record
                 survey_response = SurveyResponse(
@@ -6253,6 +6261,7 @@ def assign_survey_to_user():
                     email_result = send_survey_assignment_email(
                         to_email=user.email,
                         username=user.username,
+                        password=user.password,
                         survey_code=survey_code,
                         firstname=user.firstname,
                         organization_name=user.organization.name if user.organization else None,
