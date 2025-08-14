@@ -1411,6 +1411,44 @@ class Organization(db.Model):
     def __repr__(self):
         return f'<Organization {self.name}>'
 
+class EmailTemplate(db.Model):
+    __tablename__ = 'email_templates'
+    id = db.Column(db.BigInteger, primary_key=True, autoincrement=True)
+    organization_id = db.Column(db.Integer, db.ForeignKey('organizations.id'), nullable=False)
+    name = db.Column(db.String(255), nullable=False)
+    subject = db.Column(db.String(255), nullable=True)
+    html_body = db.Column(db.Text, nullable=True)  # Using Text for MEDIUMTEXT compatibility
+    text_body = db.Column(db.Text, nullable=True)
+    is_public = db.Column(db.Boolean, nullable=False, default=False)
+    created_at = db.Column(db.DateTime, nullable=False, server_default=db.func.current_timestamp())
+    updated_at = db.Column(db.DateTime, nullable=False, server_default=db.func.current_timestamp(), onupdate=db.func.current_timestamp())
+    
+    # Relationships
+    organization = db.relationship('Organization', foreign_keys=[organization_id], backref=db.backref('email_templates', lazy=True, cascade='all, delete-orphan'))
+    
+    # Unique constraint for organization_id + name
+    __table_args__ = (
+        db.UniqueConstraint('organization_id', 'name', name='uq_org_name'),
+        db.Index('idx_email_templates_org', 'organization_id'),
+    )
+    
+    def __repr__(self):
+        return f'<EmailTemplate {self.name} (Org: {self.organization_id})>'
+    
+    def to_dict(self):
+        """Convert EmailTemplate to dictionary for JSON serialization"""
+        return {
+            'id': self.id,
+            'organization_id': self.organization_id,
+            'name': self.name,
+            'subject': self.subject,
+            'html_body': self.html_body,
+            'text_body': self.text_body,
+            'is_public': self.is_public,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None
+        }
+
 class User(db.Model):
     __tablename__ = 'users'
     id = db.Column(db.Integer, primary_key=True)
@@ -6004,7 +6042,7 @@ def delete_report_template(template_id):
 # ---------- Email Templates CRUD Endpoints ----------
 @app.route('/api/email-templates', methods=['GET'])
 def get_email_templates():
-    """Get email templates (public or created by user)"""
+    """Get email templates, optionally filtered by organization"""
     try:
         organization_id = request.args.get('organization_id')
         if organization_id:
@@ -6044,6 +6082,8 @@ def save_email_template():
         )
         db.session.add(template)
         db.session.commit()
+        
+        logger.info(f"Created email template: {template.name} for organization {template.organization_id}")
         return jsonify({'success': True, 'template': template.to_dict()}), 201
     except Exception as e:
         db.session.rollback()
@@ -6423,6 +6463,7 @@ def test_survey_assignments():
     except Exception as e:
         logger.error(f"Error in test endpoint: {str(e)}")
         return jsonify({'error': f'Test failed: {str(e)}'}), 500
+
 
 if __name__ == '__main__':
     app.run(debug=True)
