@@ -1445,6 +1445,27 @@ class EmailTemplate(db.Model):
     
     def to_dict(self):
         """Convert EmailTemplate to dictionary for JSON serialization"""
+        # Get associated survey templates
+        survey_templates = []
+        for association in self.survey_associations:
+            survey_template = association.survey_template
+            if survey_template and survey_template.version:
+                survey_templates.append({
+                    'id': survey_template.id,
+                    'survey_code': survey_template.survey_code,
+                    'version_name': survey_template.version.name
+                })
+        
+        # Get organization and role associations
+        organization_roles = []
+        for org_role in self.organization_roles:
+            organization_roles.append({
+                'organization_id': org_role.organization_id,
+                'organization_name': org_role.organization.name if org_role.organization else None,
+                'role_id': org_role.role_id,
+                'role_name': org_role.role.name if org_role.role else None
+            })
+        
         return {
             'id': self.id,
             'organization_id': self.organization_id,
@@ -1454,8 +1475,179 @@ class EmailTemplate(db.Model):
             'text_body': self.text_body,
             'is_public': self.is_public,
             'created_at': self.created_at.isoformat() if self.created_at else None,
-            'updated_at': self.updated_at.isoformat() if self.updated_at else None
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+            'survey_templates': survey_templates,
+            'organization_roles': organization_roles
         }
+    
+    def add_survey_association(self, survey_template_id):
+        """Add a survey template association"""
+        association = EmailTemplateSurveyAssociation(
+            email_template_id=self.id,
+            survey_template_id=survey_template_id
+        )
+        db.session.add(association)
+        return association
+    
+    def remove_survey_association(self, survey_template_id):
+        """Remove a survey template association"""
+        association = EmailTemplateSurveyAssociation.query.filter_by(
+            email_template_id=self.id,
+            survey_template_id=survey_template_id
+        ).first()
+        if association:
+            db.session.delete(association)
+            return True
+        return False
+    
+    def set_organization_roles(self, organization_role_pairs):
+        """Set organization and role associations, replacing existing ones"""
+        # Remove existing organization role associations
+        EmailTemplateOrganizationRole.query.filter_by(email_template_id=self.id).delete()
+        
+        # Add new organization role associations
+        for org_role_pair in organization_role_pairs:
+            org_role = EmailTemplateOrganizationRole(
+                email_template_id=self.id,
+                organization_id=org_role_pair['organization_id'],
+                role_id=org_role_pair['role_id']
+            )
+            db.session.add(org_role)
+
+class EmailTemplateSurveyAssociation(db.Model):
+    """Association table linking email templates to survey templates"""
+    __tablename__ = 'email_template_survey_associations'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    email_template_id = db.Column(db.BigInteger, db.ForeignKey('email_templates.id'), nullable=False)
+    survey_template_id = db.Column(db.Integer, db.ForeignKey('survey_templates.id'), nullable=False)
+    created_at = db.Column(db.DateTime, server_default=db.func.current_timestamp())
+    
+    # Relationships
+    email_template = db.relationship('EmailTemplate', backref=db.backref('survey_associations', lazy=True, cascade='all, delete-orphan'))
+    survey_template = db.relationship('SurveyTemplate', backref=db.backref('email_associations', lazy=True))
+    
+    # Constraints and indexes
+    __table_args__ = (
+        db.UniqueConstraint('email_template_id', 'survey_template_id', name='uq_email_survey_association'),
+        db.Index('idx_email_template_survey_email', 'email_template_id'),
+        db.Index('idx_email_template_survey_survey', 'survey_template_id'),
+    )
+    
+    def __repr__(self):
+        return f'<EmailTemplateSurveyAssociation email_template_id={self.email_template_id} survey_template_id={self.survey_template_id}>'
+
+class EmailTemplateOrganizationRole(db.Model):
+    """Table storing organization and role associations for email templates"""
+    __tablename__ = 'email_template_organization_roles'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    email_template_id = db.Column(db.BigInteger, db.ForeignKey('email_templates.id'), nullable=False)
+    organization_id = db.Column(db.Integer, db.ForeignKey('organizations.id'), nullable=False)
+    role_id = db.Column(db.Integer, db.ForeignKey('roles.id'), nullable=False)
+    created_at = db.Column(db.DateTime, server_default=db.func.current_timestamp())
+    
+    # Relationships
+    email_template = db.relationship('EmailTemplate', backref=db.backref('organization_roles', lazy=True, cascade='all, delete-orphan'))
+    organization = db.relationship('Organization', backref=db.backref('email_template_roles', lazy=True))
+    role = db.relationship('Role', backref=db.backref('email_template_assignments', lazy=True))
+    
+    # Constraints and indexes
+    __table_args__ = (
+        db.UniqueConstraint('email_template_id', 'organization_id', 'role_id', name='uq_email_org_role'),
+        db.Index('idx_email_template_org_role_email', 'email_template_id'),
+        db.Index('idx_email_template_org_role_org', 'organization_id'),
+        db.Index('idx_email_template_org_role_role', 'role_id'),
+    )
+    
+    def __repr__(self):
+        return f'<EmailTemplateOrganizationRole email_template_id={self.email_template_id} org_id={self.organization_id} role_id={self.role_id}>'
+
+
+# ---------- Email Template Validation Functions ----------
+
+def validate_survey_template_associations(survey_template_ids, organization_id):
+    """
+    Validate that survey template associations belong to the same organization as the email template.
+    
+    Args:
+        survey_template_ids (list): List of survey template IDs to validate
+        organization_id (int): Organization ID of the email template
+        
+    Returns:
+        dict: Validation result with 'valid' boolean and 'errors' list
+    """
+    if not survey_template_ids:
+        return {'valid': True, 'errors': []}
+    
+    try:
+        # Query survey templates with their versions to check organization consistency
+        survey_templates = SurveyTemplate.query.options(joinedload(SurveyTemplate.version)).filter(
+            SurveyTemplate.id.in_(survey_template_ids)
+        ).all()
+        
+        errors = []
+        for survey_template in survey_templates:
+            if survey_template.version and survey_template.version.organization_id != organization_id:
+                errors.append(f'Survey template {survey_template.id} belongs to a different organization')
+        
+        return {
+            'valid': len(errors) == 0,
+            'errors': errors
+        }
+    except Exception as e:
+        logger.error(f"Error validating survey template associations: {str(e)}")
+        return {
+            'valid': False,
+            'errors': [f'Failed to validate survey template associations: {str(e)}']
+        }
+
+
+def validate_organization_roles(organization_role_pairs):
+    """
+    Validate that organization and role pairs exist in the database.
+    
+    Args:
+        organization_role_pairs (list): List of dicts with 'organization_id' and 'role_id'
+        
+    Returns:
+        dict: Validation result with 'valid' boolean and 'errors' list
+    """
+    if not organization_role_pairs:
+        return {'valid': True, 'errors': []}
+    
+    try:
+        errors = []
+        
+        for pair in organization_role_pairs:
+            if not isinstance(pair, dict) or 'organization_id' not in pair or 'role_id' not in pair:
+                errors.append('Each organization role pair must have organization_id and role_id')
+                continue
+                
+            organization_id = pair['organization_id']
+            role_id = pair['role_id']
+            
+            # Validate organization exists
+            organization = Organization.query.get(organization_id)
+            if not organization:
+                errors.append(f'Organization with ID {organization_id} does not exist')
+                
+            # Validate role exists
+            role = Role.query.get(role_id)
+            if not role:
+                errors.append(f'Role with ID {role_id} does not exist')
+        
+        return {
+            'valid': len(errors) == 0,
+            'errors': errors
+        }
+    except Exception as e:
+        logger.error(f"Error validating organization roles: {str(e)}")
+        return {
+            'valid': False,
+            'errors': [f'Failed to validate organization roles: {str(e)}']
+        }
+
 
 class User(db.Model):
     __tablename__ = 'users'
@@ -6050,15 +6242,38 @@ def delete_report_template(template_id):
 # ---------- Email Templates CRUD Endpoints ----------
 @app.route('/api/email-templates', methods=['GET'])
 def get_email_templates():
-    """Get email templates, optionally filtered by organization"""
+    """Get email templates, optionally filtered by organization, survey template, and organization role"""
     try:
         organization_id = request.args.get('organization_id')
+        survey_template_id = request.args.get('survey_template_id')
+        filter_organization_id = request.args.get('filter_organization_id')
+        role_id = request.args.get('role_id')
+        
+        # Start with base query
+        query = EmailTemplate.query
+        
+        # Apply organization filter
         if organization_id:
-            templates = EmailTemplate.query.filter(
+            query = query.filter(
                 db.or_(EmailTemplate.is_public == True, EmailTemplate.organization_id == organization_id)
-            ).order_by(EmailTemplate.created_at.desc()).all()
-        else:
-            templates = EmailTemplate.query.filter_by(is_public=True).order_by(EmailTemplate.created_at.desc()).all()
+            )
+        # If no organization_id specified, show all templates (for admin inventory view)
+        
+        # Apply survey template filter
+        if survey_template_id:
+            query = query.join(EmailTemplateSurveyAssociation).filter(
+                EmailTemplateSurveyAssociation.survey_template_id == survey_template_id
+            )
+        
+        # Apply organization role filter
+        if filter_organization_id or role_id:
+            query = query.join(EmailTemplateOrganizationRole)
+            if filter_organization_id:
+                query = query.filter(EmailTemplateOrganizationRole.organization_id == filter_organization_id)
+            if role_id:
+                query = query.filter(EmailTemplateOrganizationRole.role_id == role_id)
+        
+        templates = query.order_by(EmailTemplate.created_at.desc()).all()
         return jsonify({'success': True, 'templates': [t.to_dict() for t in templates]}), 200
     except Exception as e:
         logger.error(f"Error fetching email templates: {str(e)}")
@@ -6076,9 +6291,31 @@ def save_email_template():
         text_body = data.get('text_body', '')
         organization_id = data.get('organization_id')
         is_public = data.get('is_public', False)
+        survey_template_ids = data.get('survey_template_ids', [])
+        organization_roles = data.get('organization_roles', [])
 
         if not all([name, subject, html_body, organization_id]):
             return jsonify({'error': 'name, subject, html_body and organization_id are required'}), 400
+
+        # Validate survey template associations
+        survey_validation = validate_survey_template_associations(survey_template_ids, organization_id)
+        if not survey_validation['valid']:
+            return jsonify({
+                'error': 'Validation failed',
+                'details': {
+                    'survey_templates': survey_validation['errors']
+                }
+            }), 400
+
+        # Validate organization roles
+        org_role_validation = validate_organization_roles(organization_roles)
+        if not org_role_validation['valid']:
+            return jsonify({
+                'error': 'Validation failed',
+                'details': {
+                    'organization_roles': org_role_validation['errors']
+                }
+            }), 400
 
         template = EmailTemplate(
             name=name,
@@ -6089,6 +6326,25 @@ def save_email_template():
             is_public=is_public
         )
         db.session.add(template)
+        db.session.flush()  # Get the template ID
+        
+        # Create survey template associations
+        for survey_template_id in survey_template_ids:
+            association = EmailTemplateSurveyAssociation(
+                email_template_id=template.id,
+                survey_template_id=survey_template_id
+            )
+            db.session.add(association)
+        
+        # Create organization role records
+        for org_role_pair in organization_roles:
+            org_role = EmailTemplateOrganizationRole(
+                email_template_id=template.id,
+                organization_id=org_role_pair['organization_id'],
+                role_id=org_role_pair['role_id']
+            )
+            db.session.add(org_role)
+        
         db.session.commit()
         
         logger.info(f"Created email template: {template.name} for organization {template.organization_id}")
@@ -6106,6 +6362,7 @@ def update_email_template(template_id):
         template = EmailTemplate.query.get_or_404(template_id)
         data = request.get_json() or {}
 
+        # Update basic fields
         template.name = data.get('name', template.name)
         template.subject = data.get('subject', template.subject)
         template.html_body = data.get('html_body', template.html_body)
@@ -6113,6 +6370,57 @@ def update_email_template(template_id):
         template.is_public = data.get('is_public', template.is_public)
         if 'organization_id' in data and data.get('organization_id'):
             template.organization_id = data.get('organization_id')
+
+        # Handle survey template associations
+        if 'survey_template_ids' in data:
+            survey_template_ids = data.get('survey_template_ids', [])
+            
+            # Validate survey template associations
+            survey_validation = validate_survey_template_associations(survey_template_ids, template.organization_id)
+            if not survey_validation['valid']:
+                return jsonify({
+                    'error': 'Validation failed',
+                    'details': {
+                        'survey_templates': survey_validation['errors']
+                    }
+                }), 400
+            
+            # Remove existing associations
+            EmailTemplateSurveyAssociation.query.filter_by(email_template_id=template.id).delete()
+            
+            # Create new associations
+            for survey_template_id in survey_template_ids:
+                association = EmailTemplateSurveyAssociation(
+                    email_template_id=template.id,
+                    survey_template_id=survey_template_id
+                )
+                db.session.add(association)
+
+        # Handle organization roles
+        if 'organization_roles' in data:
+            organization_roles = data.get('organization_roles', [])
+            
+            # Validate organization roles
+            org_role_validation = validate_organization_roles(organization_roles)
+            if not org_role_validation['valid']:
+                return jsonify({
+                    'error': 'Validation failed',
+                    'details': {
+                        'organization_roles': org_role_validation['errors']
+                    }
+                }), 400
+            
+            # Remove existing organization roles
+            EmailTemplateOrganizationRole.query.filter_by(email_template_id=template.id).delete()
+            
+            # Create new organization roles
+            for org_role_pair in organization_roles:
+                org_role = EmailTemplateOrganizationRole(
+                    email_template_id=template.id,
+                    organization_id=org_role_pair['organization_id'],
+                    role_id=org_role_pair['role_id']
+                )
+                db.session.add(org_role)
 
         db.session.commit()
         return jsonify({'success': True, 'template': template.to_dict()}), 200
@@ -6124,11 +6432,25 @@ def update_email_template(template_id):
 
 @app.route('/api/email-templates/<int:template_id>', methods=['DELETE'])
 def delete_email_template(template_id):
-    """Delete an email template"""
+    """Delete an email template and its associated records"""
     try:
         template = EmailTemplate.query.get_or_404(template_id)
+        
+        # The cascade='all, delete-orphan' in the model relationships should handle
+        # automatic deletion of related EmailTemplateSurveyAssociation and EmailTemplateAudience records
+        # But we can explicitly delete them for clarity and to ensure proper cleanup
+        
+        # Delete survey template associations
+        EmailTemplateSurveyAssociation.query.filter_by(email_template_id=template.id).delete()
+        
+        # Delete organization role records
+        EmailTemplateOrganizationRole.query.filter_by(email_template_id=template.id).delete()
+        
+        # Delete the template itself
         db.session.delete(template)
         db.session.commit()
+        
+        logger.info(f"Deleted email template {template_id} and its associated records")
         return jsonify({'success': True, 'message': 'Template deleted successfully'}), 200
     except Exception as e:
         db.session.rollback()
@@ -6474,6 +6796,56 @@ def test_survey_assignments():
     except Exception as e:
         logger.error(f"Error in test endpoint: {str(e)}")
         return jsonify({'error': f'Test failed: {str(e)}'}), 500
+
+@app.route('/api/survey-templates/by-organization/<int:org_id>', methods=['GET'])
+def get_survey_templates_by_organization(org_id):
+    """Get survey templates for a specific organization for dropdown population"""
+    try:
+        logger.info(f"Fetching survey templates for organization {org_id}")
+        
+        # Verify organization exists
+        organization = Organization.query.get(org_id)
+        if not organization:
+            logger.warning(f"Organization with ID {org_id} not found")
+            return jsonify({'error': 'Organization not found'}), 404
+        
+        # Get survey templates for the organization through template versions
+        # Join SurveyTemplate -> SurveyTemplateVersion -> Organization
+        survey_templates = db.session.query(SurveyTemplate)\
+            .join(SurveyTemplateVersion, SurveyTemplate.version_id == SurveyTemplateVersion.id)\
+            .filter(SurveyTemplateVersion.organization_id == org_id)\
+            .options(joinedload(SurveyTemplate.version))\
+            .all()
+        
+        logger.info(f"Found {len(survey_templates)} survey templates for organization {org_id}")
+        
+        # Format response with id, survey_code, and version information
+        result = []
+        for template in survey_templates:
+            template_data = {
+                'id': template.id,
+                'survey_code': template.survey_code,
+                'version_name': template.version.name if template.version else f'Version {template.version_id}',
+                'version_id': template.version_id,
+                'created_at': template.created_at.isoformat() if template.created_at else None
+            }
+            result.append(template_data)
+            logger.debug(f"Added template: {template.survey_code} (ID: {template.id})")
+        
+        response_data = {
+            'organization_id': org_id,
+            'organization_name': organization.name,
+            'total_templates': len(result),
+            'survey_templates': result
+        }
+        
+        logger.info(f"Returning {len(result)} survey templates for organization {org_id}")
+        return jsonify(response_data), 200
+        
+    except Exception as e:
+        logger.error(f"Error fetching survey templates for organization {org_id}: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': f'Failed to fetch survey templates: {str(e)}'}), 500
 
 
 if __name__ == '__main__':
