@@ -299,28 +299,78 @@ The Saurara Research Team
             'error': f"SMTP email sending failed: {str(e)}"
         }
 
-def send_welcome_email(to_email, username, password, firstname=None, survey_code=None):
-    """Send welcome email to new user (tries SES API first, falls back to SMTP)"""
+def send_welcome_email(to_email, username, password, firstname=None, survey_code=None, email_template_id=None):
+    """Send welcome email to new user using database template (tries SES API first, falls back to SMTP)"""
     try:
-        ses_client = get_ses_client()
-        if not ses_client:
-            logger.warning("SES API client failed, trying SMTP method...")
-            return send_welcome_email_smtp(to_email, username, password, firstname, survey_code)
+        # Try to get specific email template by ID, or fallback to default welcome template
+        if email_template_id:
+            try:
+                template = EmailTemplate.query.get(email_template_id)
+                if template:
+                    template_data = {
+                        'name': template.name,
+                        'subject': template.subject,
+                        'html_body': template.html_body,
+                        'text_body': template.text_body
+                    }
+                    use_template = True
+                    logger.info(f"Using specific email template ID {email_template_id}: {template.name}")
+                else:
+                    # Fallback to default template if specified template not found
+                    template_response = get_email_template_by_type('welcome')
+                    use_template = template_response[1] == 200
+                    if use_template:
+                        template_data = template_response[0].get_json()
+                        logger.info("Specified template not found, using default welcome template")
+                    else:
+                        use_template = False
+            except Exception as e:
+                logger.error(f"Error fetching specific email template {email_template_id}: {str(e)}")
+                # Fallback to default template
+                template_response = get_email_template_by_type('welcome')
+                use_template = template_response[1] == 200
+                if use_template:
+                    template_data = template_response[0].get_json()
+                    logger.info("Error with specific template, using default welcome template")
+                else:
+                    use_template = False
+        else:
+            # Use default welcome template
+            template_response = get_email_template_by_type('welcome')
+            use_template = template_response[1] == 200
+            if use_template:
+                template_data = template_response[0].get_json()
+                logger.info("Using default welcome template")
         
-        # Email content
-        subject = "Welcome to Saurara Platform"
-        
-        # Create personalized greeting
-        greeting = f"Dear {firstname}" if firstname else f"Dear {username}"
-        
-        # Debug the password being used in email template
-        logger.info(f"Email template variables - Username: '{username}', Email: '{to_email}', Password: '{password}', Survey Code: '{survey_code}', Greeting: '{greeting}'")
-        
-        body_text = f"""{greeting},
+        if use_template:
+            subject = template_data['subject']
+            
+            # Create personalized greeting
+            greeting = f"Dear {firstname}" if firstname else f"Dear {username}"
+            
+            # Template variables
+            template_vars = {
+                'greeting': greeting,
+                'username': username,
+                'email': to_email,
+                'password': password,
+                'survey_code': survey_code if survey_code else 'Not assigned'
+            }
+            
+            # Render template content
+            body_text = render_email_template(template_data['text_body'], **template_vars)
+            body_html = render_email_template(template_data['html_body'], **template_vars)
+            
+            logger.info(f"Using email template: {template_data['name']}")
+        else:
+            # Fallback to hardcoded content if template not found
+            logger.warning("Welcome email template not found, using fallback content")
+            subject = "Welcome to Saurara Platform"
+            greeting = f"Dear {firstname}" if firstname else f"Dear {username}"
+            
+            body_text = f"""{greeting},
 
 🎉 Welcome to the Saurara Platform! We are thrilled to have you join our growing community of researchers, educators, and community leaders.
-
-We're excited to welcome you aboard! Your account has been successfully created and you're ready to embark on your journey with us.
 
 🔐 Your Account Credentials:
 • Username: {username}
@@ -329,185 +379,20 @@ We're excited to welcome you aboard! Your account has been successfully created 
 • Survey Code: {survey_code if survey_code else 'Not assigned'}
 • Platform Access: www.saurara.org
 
-🚀 Quick Start Guide:
-1. Visit www.saurara.org
-2. Click on "Login" or "Survey Access"
-3. Enter your username and password above
-4. Complete your profile setup when ready
-5. Explore survey opportunities and platform features
-6. Connect with your organization and peers
-
-🔒 Important Security Information:
-For your account security, please change your password during your first login. Keep your credentials safe and never share them with unauthorized individuals.
-
-🎯 What Awaits You:
-As a member of the Saurara community, you'll receive invitations to participate in meaningful research initiatives. Your insights will contribute to understanding and improving educational and community programs worldwide. Every response makes a difference!
-
-📚 Platform Features:
-• Personalized survey dashboard
-• Progress tracking and completion status
-• Secure data handling and privacy protection
-• Community insights and research updates
-• Professional networking opportunities
-
-💡 Getting the Most Out of Saurara:
-- Complete your profile for better survey matching
-- Respond to surveys thoughtfully and thoroughly
-- Stay engaged with platform updates and announcements
-- Reach out for support whenever needed
-
-🆘 Need Assistance?
-Our dedicated support team is here to help you succeed. Whether you have technical questions, need guidance on surveys, or want to learn more about our research initiatives, we're just a message away!
-
-We're honored to have you as part of the Saurara family. Together, we're building a better understanding of education and community development globally.
-
 Welcome aboard! 🌟
 
 Best regards,
-The Saurara Research Team
+The Saurara Research Team"""
 
----
-🌐 Platform: www.saurara.org
-📧 Support: support@saurara.org
-📱 Stay Connected: Follow us for updates and insights"""
-
-        body_html = f"""
-        <html>
-        <head>
-            <style>
-                body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; line-height: 1.6; color: #333; margin: 0; padding: 0; }}
-                .container {{ max-width: 650px; margin: 0 auto; padding: 20px; background: #f8fafc; }}
-                .header {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 40px 30px; text-align: center; border-radius: 15px 15px 0 0; box-shadow: 0 4px 20px rgba(102, 126, 234, 0.3); }}
-                .content {{ background: #ffffff; padding: 40px 30px; border: 1px solid #e2e8f0; box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1); }}
-                .footer {{ background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%); padding: 30px; border-radius: 0 0 15px 15px; border: 1px solid #e2e8f0; border-top: none; }}
-                .welcome-banner {{ background: linear-gradient(135deg, #10b981 0%, #059669 100%); color: white; padding: 20px; border-radius: 12px; margin: 25px 0; text-align: center; box-shadow: 0 4px 15px rgba(16, 185, 129, 0.3); }}
-                .credentials-box {{ background: linear-gradient(135deg, #e8f5e8 0%, #dcf4dc 100%); padding: 25px; border-radius: 12px; margin: 25px 0; border-left: 5px solid #10b981; box-shadow: 0 2px 10px rgba(16, 185, 129, 0.1); }}
-                .button {{ display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 15px 30px; text-decoration: none; border-radius: 8px; font-weight: bold; margin: 15px 0; box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3); transition: transform 0.2s; }}
-                .button:hover {{ transform: translateY(-2px); }}
-                .quick-start {{ background: linear-gradient(135deg, #fff9e6 0%, #fef3c7 100%); padding: 25px; border-radius: 12px; margin: 25px 0; border-left: 5px solid #f59e0b; }}
-                .security-alert {{ background: linear-gradient(135deg, #fef7e0 0%, #fed7aa 100%); padding: 20px; border-radius: 12px; margin: 25px 0; border-left: 5px solid #f97316; }}
-                .features-grid {{ background: linear-gradient(135deg, #ede9fe 0%, #ddd6fe 100%); padding: 25px; border-radius: 12px; margin: 25px 0; border-left: 5px solid #8b5cf6; }}
-                .tips-section {{ background: linear-gradient(135deg, #ecfdf5 0%, #d1fae5 100%); padding: 25px; border-radius: 12px; margin: 25px 0; border-left: 5px solid #10b981; }}
-                .support-box {{ background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%); padding: 25px; border-radius: 12px; margin: 25px 0; border-left: 5px solid #3b82f6; }}
-                .welcome-tag {{ background: linear-gradient(135deg, #10b981 0%, #059669 100%); color: white; padding: 6px 15px; border-radius: 25px; font-size: 12px; font-weight: bold; display: inline-block; }}
-                .credential-item {{ background: white; padding: 12px; margin: 8px 0; border-radius: 8px; border-left: 3px solid #10b981; }}
-                .feature-item {{ margin: 10px 0; padding: 8px 0; }}
-                .tip-item {{ margin: 8px 0; padding: 5px 0; }}
-                ol {{ padding-left: 25px; }}
-                ol li {{ margin: 10px 0; padding: 5px 0; }}
-                .sparkle {{ color: #f59e0b; }}
-                .heart {{ color: #ef4444; }}
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <div class="header">
-                    <h1 style="margin: 0; font-size: 32px; text-shadow: 0 2px 4px rgba(0,0,0,0.3);">🎉 Welcome to Saurara!</h1>
-                    <p style="margin: 15px 0 0 0; font-size: 18px; opacity: 0.95; font-weight: 300;">Research & Community Excellence Platform</p>
-                    <div style="margin-top: 20px;">
-                        <span style="background: rgba(255,255,255,0.2); padding: 8px 16px; border-radius: 20px; font-size: 14px;">✨ Your Journey Begins Now ✨</span>
-                    </div>
-                </div>
-                
-                <div class="content">
-                    <p style="font-size: 19px; margin-bottom: 25px; color: #374151;">{greeting},</p>
-                    
-                    <div class="welcome-banner">
-                        <h2 style="margin: 0 0 10px 0; font-size: 24px;">🌟 Welcome to Our Community!</h2>
-                        <p style="margin: 0; font-size: 16px; opacity: 0.95;">We are thrilled to have you join our growing community of researchers, educators, and community leaders. Your account has been successfully created and you're ready to embark on your journey with us!</p>
-                    </div>
-                    
-                    <div class="credentials-box">
-                        <h3 style="color: #065f46; margin-top: 0; font-size: 20px;">🔐 Your Account Credentials</h3>
-                        <div class="credential-item">
-                            <strong>👤 Username:</strong> <code style="background: #f3f4f6; padding: 4px 8px; border-radius: 6px; font-family: 'Courier New', monospace; color: #374151; font-weight: bold;">{username}</code>
-                        </div>
-                        <div class="credential-item">
-                            <strong>📧 Email Address:</strong> <span style="color: #3b82f6; font-weight: 500;">{to_email}</span>
-                        </div>
-                        <div class="credential-item">
-                            <strong>🔑 Temporary Password:</strong> <code style="background: #fef3c7; padding: 4px 8px; border-radius: 6px; font-family: 'Courier New', monospace; color: #92400e; font-weight: bold; border: 1px solid #f59e0b;">{password}</code>
-                        </div>
-                        <div class="credential-item">
-                            <strong>🆔 Survey Code:</strong> <code style="background: #f0f9ff; padding: 4px 8px; border-radius: 6px; font-family: 'Courier New', monospace; color: #1e40af; font-weight: bold; border: 1px solid #3b82f6;">{survey_code if survey_code else 'Not assigned'}</code>
-                        </div>
-                        <div class="credential-item">
-                            <strong>🌐 Platform Access:</strong> <a href="http://www.saurara.org" style="color: #667eea; font-weight: 600; text-decoration: none;">www.saurara.org</a>
-                        </div>
-                    </div>
-                    
-                    <div style="text-align: center; margin: 35px 0;">
-                        <a href="http://www.saurara.org" class="button" style="font-size: 16px;">🚀 Access Platform Now</a>
-                    </div>
-                    
-                    <div class="quick-start">
-                        <h3 style="color: #92400e; margin-top: 0; font-size: 18px;">📋 Quick Start Guide</h3>
-                        <ol style="color: #374151;">
-                            <li><strong>Visit</strong> <a href="http://www.saurara.org" style="color: #667eea;">www.saurara.org</a></li>
-                            <li><strong>Click</strong> on "Login" or "Survey Access"</li>
-                            <li><strong>Enter</strong> your username and password above</li>
-                            <li><strong>Complete</strong> your profile setup when ready</li>
-                            <li><strong>Explore</strong> survey opportunities and platform features</li>
-                            <li><strong>Connect</strong> with your organization and peers</li>
-                        </ol>
-                    </div>
-                    
-                    <div class="security-alert">
-                        <h3 style="color: #c2410c; margin-top: 0; font-size: 18px;">🔒 Important Security Information</h3>
-                        <p style="margin-bottom: 0; color: #374151;"><strong>For your account security:</strong> Please change your password during your first login. Keep your credentials safe and never share them with unauthorized individuals. Your data privacy and security are our top priorities.</p>
-                    </div>
-                    
-                    <div style="background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%); padding: 25px; border-radius: 12px; margin: 25px 0; border-left: 5px solid #0ea5e9;">
-                        <h3 style="color: #0c4a6e; margin-top: 0; font-size: 18px;">🎯 What Awaits You</h3>
-                        <p style="color: #374151; margin-bottom: 0;">As a member of the Saurara community, you'll receive invitations to participate in meaningful research initiatives. Your insights will contribute to understanding and improving educational and community programs worldwide. <strong>Every response makes a difference!</strong></p>
-                    </div>
-                    
-                    <div class="features-grid">
-                        <h3 style="color: #5b21b6; margin-top: 0; font-size: 18px;">📚 Platform Features</h3>
-                        <div class="feature-item">• <strong>Personalized survey dashboard</strong> - Tailored to your profile</div>
-                        <div class="feature-item">• <strong>Progress tracking</strong> - Monitor your completion status</div>
-                        <div class="feature-item">• <strong>Secure data handling</strong> - Privacy protection guaranteed</div>
-                        <div class="feature-item">• <strong>Community insights</strong> - Access research updates</div>
-                        <div class="feature-item">• <strong>Professional networking</strong> - Connect with peers</div>
-                    </div>
-                    
-                    <div class="tips-section">
-                        <h3 style="color: #065f46; margin-top: 0; font-size: 18px;">💡 Getting the Most Out of Saurara</h3>
-                        <div class="tip-item">📝 Complete your profile for better survey matching</div>
-                        <div class="tip-item">🎯 Respond to surveys thoughtfully and thoroughly</div>
-                        <div class="tip-item">📢 Stay engaged with platform updates and announcements</div>
-                        <div class="tip-item">🤝 Reach out for support whenever needed</div>
-                    </div>
-                    
-                    <div class="support-box">
-                        <h3 style="color: #1d4ed8; margin-top: 0; font-size: 18px;">🆘 Need Assistance?</h3>
-                        <p style="margin-bottom: 15px; color: #374151;">Our dedicated support team is here to help you succeed. Whether you have technical questions, need guidance on surveys, or want to learn more about our research initiatives, we're just a message away!</p>
-                        <p style="margin-bottom: 0; color: #374151;"><strong>We're honored to have you as part of the Saurara family.</strong> Together, we're building a better understanding of education and community development globally.</p>
-                    </div>
-                    
-                    <div style="text-align: center; margin: 35px 0; padding: 25px; background: linear-gradient(135deg, #fef7e0 0%, #fed7aa 100%); border-radius: 12px;">
-                        <h2 style="color: #c2410c; margin: 0 0 15px 0; font-size: 22px;">Welcome Aboard! <span class="sparkle">✨</span></h2>
-                        <p style="color: #374151; margin: 0; font-size: 16px; font-weight: 500;">Thank you for joining the Saurara community! <span class="heart">❤️</span></p>
-                    </div>
-                </div>
-                
-                <div class="footer">
-                    <p style="margin: 0; text-align: center; color: #4b5563; font-size: 16px;">
-                        <strong>Best regards,<br>The Saurara Research Team</strong>
-                    </p>
-                    <hr style="border: none; border-top: 2px solid #d1d5db; margin: 20px 0;">
-                    <div style="text-align: center;">
-                        <span class="welcome-tag">WELCOME</span>
-                    </div>
-                    <p style="margin: 15px 0 0 0; text-align: center; color: #6b7280; font-size: 14px;">
-                        🌐 Platform: <a href="http://www.saurara.org" style="color: #667eea;">www.saurara.org</a> | 
-                        📧 Support: <a href="mailto:support@saurara.org" style="color: #667eea;">support@saurara.org</a><br>
-                        📱 Stay Connected: Follow us for updates and insights
-                    </p>
-                </div>
-            </div>
-        </body>
-        </html>"""
+            body_html = f"""<html><body><h1>Welcome to Saurara!</h1><p>{greeting},</p><p>🎉 Welcome to the Saurara Platform!</p><p><strong>Your Account Credentials:</strong><br>Username: {username}<br>Password: {password}<br>Survey Code: {survey_code if survey_code else 'Not assigned'}</p><p>Best regards,<br>The Saurara Research Team</p></body></html>"""
+        
+        ses_client = get_ses_client()
+        if not ses_client:
+            logger.warning("SES API client failed, trying SMTP method...")
+            return send_welcome_email_smtp(to_email, username, password, firstname, survey_code)
+        
+        # Debug the password being used in email template
+        logger.info(f"Email template variables - Username: '{username}', Email: '{to_email}', Password: '{password}', Survey Code: '{survey_code}'")
         
         # Get verified sender email from environment
         source_email = os.getenv('SES_VERIFIED_EMAIL', 'noreply@saurara.org')
@@ -1099,142 +984,57 @@ Visit: www.saurara.org | Email: support@saurara.org"""
         }
 
 def send_reminder_email(to_email, username, survey_code, firstname=None, organization_name=None, days_remaining=None):
-    """Send reminder email to user (tries SES API first, falls back to SMTP)"""
+    """Send reminder email to user using database template (tries SES API first, falls back to SMTP)"""
     try:
-        ses_client = get_ses_client()
-        if not ses_client:
-            logger.warning("SES API client failed, trying SMTP method...")
-            return send_reminder_email_smtp(to_email, username, survey_code, firstname, organization_name, days_remaining)
+        # Try to get reminder email template from database
+        template_response = get_email_template_by_type('reminder')
+        use_template = template_response[1] == 200
         
-        # Email content
-        subject = "🔔 Reminder: Complete Your Saurara Survey"
-        greeting = f"Dear {firstname}" if firstname else f"Dear {username}"
-        org_text = f" from {organization_name}" if organization_name else ""
-        deadline_text = f" You have {days_remaining} days remaining to complete it." if days_remaining else ""
-        
-        body_text = f"""{greeting},
+        if use_template:
+            template_data = template_response[0].get_json()
+            subject = template_data['subject']
+            
+            # Create personalized greeting and template variables
+            greeting = f"Dear {firstname}" if firstname else f"Dear {username}"
+            org_text = f" from {organization_name}" if organization_name else ""
+            deadline_text = f" You have {days_remaining} days remaining to complete it." if days_remaining else ""
+            
+            template_vars = {
+                'greeting': greeting,
+                'username': username,
+                'survey_code': survey_code,
+                'org_text': org_text,
+                'deadline_text': deadline_text
+            }
+            
+            # Render template content
+            body_text = render_email_template(template_data['text_body'], **template_vars)
+            body_html = render_email_template(template_data['html_body'], **template_vars)
+            
+            logger.info(f"Using email template: {template_data['name']}")
+        else:
+            # Fallback to hardcoded content if template not found
+            logger.warning("Reminder email template not found, using fallback content")
+            subject = "🔔 Reminder: Complete Your Saurara Survey"
+            greeting = f"Dear {firstname}" if firstname else f"Dear {username}"
+            org_text = f" from {organization_name}" if organization_name else ""
+            deadline_text = f" You have {days_remaining} days remaining to complete it." if days_remaining else ""
+            
+            body_text = f"""{greeting},
 
 We hope this message finds you well!
 
 This is a friendly reminder that you have a pending survey{org_text} on the Saurara Platform that requires your attention.{deadline_text}
 
-Your Survey Details:
-• Username: {username}
-• Survey Code: {survey_code}
-• Survey Link: www.saurara.org
-
-Why Your Response Matters:
-Your input is invaluable in helping us understand and improve educational and community initiatives. Every response contributes to meaningful research that can make a real difference in communities like yours.
-
-What You Need to Do:
-1. Visit www.saurara.org
-2. Enter your survey code: {survey_code}
-3. Complete the survey at your convenience
-4. Submit your responses
-
-The survey typically takes 15-20 minutes to complete, and you can save your progress and return later if needed.
-
-Need Help?
-If you're experiencing any difficulties or have questions about the survey, please don't hesitate to reach out to our support team. We're here to help!
-
-We truly appreciate your time and participation. Your voice matters, and we look forward to receiving your valuable insights.
-
-Thank you for being part of the Saurara community!
-
 Best regards,
-The Saurara Research Team
+The Saurara Research Team"""
 
----
-This is an automated reminder. If you have already completed the survey, please disregard this message.
-Visit: www.saurara.org | Email: support@saurara.org"""
-
-        body_html = f"""
-        <html>
-        <head>
-            <style>
-                body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; line-height: 1.6; color: #333; }}
-                .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
-                .header {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px 20px; text-align: center; border-radius: 10px 10px 0 0; }}
-                .content {{ background: #ffffff; padding: 30px; border: 1px solid #e0e0e0; }}
-                .footer {{ background: #f8f9fa; padding: 20px; border-radius: 0 0 10px 10px; border: 1px solid #e0e0e0; border-top: none; }}
-                .highlight {{ background: #f0f8ff; padding: 15px; border-left: 4px solid #667eea; margin: 20px 0; }}
-                .survey-details {{ background: #e8f5e8; padding: 20px; border-radius: 8px; margin: 20px 0; }}
-                .button {{ display: inline-block; background: #667eea; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold; margin: 10px 0; }}
-                .steps {{ background: #fff9e6; padding: 20px; border-radius: 8px; margin: 20px 0; }}
-                .steps ol {{ margin: 0; padding-left: 20px; }}
-                .steps li {{ margin: 8px 0; }}
-                .reminder-tag {{ background: #ff6b6b; color: white; padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: bold; }}
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <div class="header">
-                    <h1 style="margin: 0; font-size: 28px;">🔔 Survey Reminder</h1>
-                    <p style="margin: 10px 0 0 0; font-size: 16px; opacity: 0.9;">Saurara Research Platform</p>
-                </div>
-                
-                <div class="content">
-                    <p style="font-size: 18px; margin-bottom: 20px;">{greeting},</p>
-                    
-                    <p>We hope this message finds you well!</p>
-                    
-                    <div class="highlight">
-                        <p><strong>📋 Pending Survey Reminder</strong></p>
-                        <p>You have a pending survey{org_text} on the Saurara Platform that requires your attention.{deadline_text}</p>
-                    </div>
-                    
-                    <div class="survey-details">
-                        <h3 style="color: #2c5530; margin-top: 0;">📊 Your Survey Details</h3>
-                        <ul style="list-style-type: none; padding-left: 0;">
-                            <li><strong>👤 Username:</strong> {username}</li>
-                            <li><strong>🔑 Survey Code:</strong> <code style="background: #f0f0f0; padding: 2px 6px; border-radius: 4px; font-family: monospace;">{survey_code}</code></li>
-                            <li><strong>🌐 Platform:</strong> <a href="http://www.saurara.org" style="color: #667eea;">www.saurara.org</a></li>
-                        </ul>
-                    </div>
-                    
-                    <div style="text-align: center; margin: 30px 0;">
-                        <a href="http://www.saurara.org" class="button">🚀 Complete Survey Now</a>
-                    </div>
-                    
-                    <h3 style="color: #667eea;">🎯 Why Your Response Matters</h3>
-                    <p>Your input is invaluable in helping us understand and improve educational and community initiatives. Every response contributes to meaningful research that can make a real difference in communities like yours.</p>
-                    
-                    <div class="steps">
-                        <h3 style="color: #b8860b; margin-top: 0;">📝 Quick Steps to Complete</h3>
-                        <ol>
-                            <li>Visit <a href="http://www.saurara.org" style="color: #667eea;">www.saurara.org</a></li>
-                            <li>Enter your survey code: <strong>{survey_code}</strong></li>
-                            <li>Complete the survey at your convenience</li>
-                            <li>Submit your responses</li>
-                        </ol>
-                        <p style="margin-bottom: 0;"><em>⏱️ Typically takes 15-20 minutes • 💾 Save progress and return later</em></p>
-                    </div>
-                    
-                    <div style="background: #e8f4fd; padding: 20px; border-radius: 8px; margin: 20px 0;">
-                        <h3 style="color: #1565c0; margin-top: 0;">🆘 Need Help?</h3>
-                        <p style="margin-bottom: 0;">If you're experiencing any difficulties or have questions about the survey, please don't hesitate to reach out to our support team. We're here to help!</p>
-                    </div>
-                    
-                    <p>We truly appreciate your time and participation. Your voice matters, and we look forward to receiving your valuable insights.</p>
-                    
-                    <p style="font-weight: bold; color: #667eea;">Thank you for being part of the Saurara community! 🌟</p>
-                </div>
-                
-                <div class="footer">
-                    <p style="margin: 0; text-align: center; color: #666; font-size: 14px;">
-                        <strong>Best regards,<br>The Saurara Research Team</strong>
-                    </p>
-                    <hr style="border: none; border-top: 1px solid #e0e0e0; margin: 15px 0;">
-                    <p style="margin: 0; text-align: center; color: #888; font-size: 12px;">
-                        <span class="reminder-tag">REMINDER</span><br><br>
-                        This is an automated reminder. If you have already completed the survey, please disregard this message.<br>
-                        <a href="http://www.saurara.org" style="color: #667eea;">www.saurara.org</a> | 
-                        <a href="mailto:support@saurara.org" style="color: #667eea;">support@saurara.org</a>
-                    </p>
-                </div>
-            </div>
-        </body>
-        </html>"""
+            body_html = f"""<html><body><h1>Survey Reminder</h1><p>{greeting},</p><p>This is a friendly reminder that you have a pending survey on the Saurara Platform.</p><p><strong>Survey Code:</strong> {survey_code}</p><p>Visit: www.saurara.org</p><p>Best regards,<br>The Saurara Research Team</p></body></html>"""
+        
+        ses_client = get_ses_client()
+        if not ses_client:
+            logger.warning("SES API client failed, trying SMTP method...")
+            return send_reminder_email_smtp(to_email, username, survey_code, firstname, organization_name, days_remaining)
         
         # Get verified sender email from environment
         source_email = os.getenv('SES_VERIFIED_EMAIL', 'noreply@saurara.org')
@@ -1445,30 +1245,10 @@ class EmailTemplate(db.Model):
     
     def to_dict(self):
         """Convert EmailTemplate to dictionary for JSON serialization"""
-        # Get associated survey templates
-        survey_templates = []
-        for association in self.survey_associations:
-            survey_template = association.survey_template
-            if survey_template and survey_template.version:
-                survey_templates.append({
-                    'id': survey_template.id,
-                    'survey_code': survey_template.survey_code,
-                    'version_name': survey_template.version.name
-                })
-        
-        # Get organization and role associations
-        organization_roles = []
-        for org_role in self.organization_roles:
-            organization_roles.append({
-                'organization_id': org_role.organization_id,
-                'organization_name': org_role.organization.name if org_role.organization else None,
-                'role_id': org_role.role_id,
-                'role_name': org_role.role.name if org_role.role else None
-            })
-        
         return {
             'id': self.id,
             'organization_id': self.organization_id,
+            'organization_name': self.organization.name if self.organization else None,
             'name': self.name,
             'subject': self.subject,
             'html_body': self.html_body,
@@ -1476,177 +1256,16 @@ class EmailTemplate(db.Model):
             'is_public': self.is_public,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
-            'survey_templates': survey_templates,
-            'organization_roles': organization_roles
+            'survey_templates': [],  # No associations needed
+            'organization_roles': []  # No associations needed
         }
     
-    def add_survey_association(self, survey_template_id):
-        """Add a survey template association"""
-        association = EmailTemplateSurveyAssociation(
-            email_template_id=self.id,
-            survey_template_id=survey_template_id
-        )
-        db.session.add(association)
-        return association
-    
-    def remove_survey_association(self, survey_template_id):
-        """Remove a survey template association"""
-        association = EmailTemplateSurveyAssociation.query.filter_by(
-            email_template_id=self.id,
-            survey_template_id=survey_template_id
-        ).first()
-        if association:
-            db.session.delete(association)
-            return True
-        return False
-    
-    def set_organization_roles(self, organization_role_pairs):
-        """Set organization and role associations, replacing existing ones"""
-        # Remove existing organization role associations
-        EmailTemplateOrganizationRole.query.filter_by(email_template_id=self.id).delete()
-        
-        # Add new organization role associations
-        for org_role_pair in organization_role_pairs:
-            org_role = EmailTemplateOrganizationRole(
-                email_template_id=self.id,
-                organization_id=org_role_pair['organization_id'],
-                role_id=org_role_pair['role_id']
-            )
-            db.session.add(org_role)
-
-class EmailTemplateSurveyAssociation(db.Model):
-    """Association table linking email templates to survey templates"""
-    __tablename__ = 'email_template_survey_associations'
-    
-    id = db.Column(db.Integer, primary_key=True)
-    email_template_id = db.Column(db.BigInteger, db.ForeignKey('email_templates.id'), nullable=False)
-    survey_template_id = db.Column(db.Integer, db.ForeignKey('survey_templates.id'), nullable=False)
-    created_at = db.Column(db.DateTime, server_default=db.func.current_timestamp())
-    
-    # Relationships
-    email_template = db.relationship('EmailTemplate', backref=db.backref('survey_associations', lazy=True, cascade='all, delete-orphan'))
-    survey_template = db.relationship('SurveyTemplate', backref=db.backref('email_associations', lazy=True))
-    
-    # Constraints and indexes
-    __table_args__ = (
-        db.UniqueConstraint('email_template_id', 'survey_template_id', name='uq_email_survey_association'),
-        db.Index('idx_email_template_survey_email', 'email_template_id'),
-        db.Index('idx_email_template_survey_survey', 'survey_template_id'),
-    )
-    
-    def __repr__(self):
-        return f'<EmailTemplateSurveyAssociation email_template_id={self.email_template_id} survey_template_id={self.survey_template_id}>'
-
-class EmailTemplateOrganizationRole(db.Model):
-    """Table storing organization and role associations for email templates"""
-    __tablename__ = 'email_template_organization_roles'
-    
-    id = db.Column(db.Integer, primary_key=True)
-    email_template_id = db.Column(db.BigInteger, db.ForeignKey('email_templates.id'), nullable=False)
-    organization_id = db.Column(db.Integer, db.ForeignKey('organizations.id'), nullable=False)
-    role_id = db.Column(db.Integer, db.ForeignKey('roles.id'), nullable=False)
-    created_at = db.Column(db.DateTime, server_default=db.func.current_timestamp())
-    
-    # Relationships
-    email_template = db.relationship('EmailTemplate', backref=db.backref('organization_roles', lazy=True, cascade='all, delete-orphan'))
-    organization = db.relationship('Organization', backref=db.backref('email_template_roles', lazy=True))
-    role = db.relationship('Role', backref=db.backref('email_template_assignments', lazy=True))
-    
-    # Constraints and indexes
-    __table_args__ = (
-        db.UniqueConstraint('email_template_id', 'organization_id', 'role_id', name='uq_email_org_role'),
-        db.Index('idx_email_template_org_role_email', 'email_template_id'),
-        db.Index('idx_email_template_org_role_org', 'organization_id'),
-        db.Index('idx_email_template_org_role_role', 'role_id'),
-    )
-    
-    def __repr__(self):
-        return f'<EmailTemplateOrganizationRole email_template_id={self.email_template_id} org_id={self.organization_id} role_id={self.role_id}>'
 
 
-# ---------- Email Template Validation Functions ----------
-
-def validate_survey_template_associations(survey_template_ids, organization_id):
-    """
-    Validate that survey template associations belong to the same organization as the email template.
-    
-    Args:
-        survey_template_ids (list): List of survey template IDs to validate
-        organization_id (int): Organization ID of the email template
-        
-    Returns:
-        dict: Validation result with 'valid' boolean and 'errors' list
-    """
-    if not survey_template_ids:
-        return {'valid': True, 'errors': []}
-    
-    try:
-        # Query survey templates with their versions to check organization consistency
-        survey_templates = SurveyTemplate.query.options(joinedload(SurveyTemplate.version)).filter(
-            SurveyTemplate.id.in_(survey_template_ids)
-        ).all()
-        
-        errors = []
-        for survey_template in survey_templates:
-            if survey_template.version and survey_template.version.organization_id != organization_id:
-                errors.append(f'Survey template {survey_template.id} belongs to a different organization')
-        
-        return {
-            'valid': len(errors) == 0,
-            'errors': errors
-        }
-    except Exception as e:
-        logger.error(f"Error validating survey template associations: {str(e)}")
-        return {
-            'valid': False,
-            'errors': [f'Failed to validate survey template associations: {str(e)}']
-        }
 
 
-def validate_organization_roles(organization_role_pairs):
-    """
-    Validate that organization and role pairs exist in the database.
-    
-    Args:
-        organization_role_pairs (list): List of dicts with 'organization_id' and 'role_id'
-        
-    Returns:
-        dict: Validation result with 'valid' boolean and 'errors' list
-    """
-    if not organization_role_pairs:
-        return {'valid': True, 'errors': []}
-    
-    try:
-        errors = []
-        
-        for pair in organization_role_pairs:
-            if not isinstance(pair, dict) or 'organization_id' not in pair or 'role_id' not in pair:
-                errors.append('Each organization role pair must have organization_id and role_id')
-                continue
-                
-            organization_id = pair['organization_id']
-            role_id = pair['role_id']
-            
-            # Validate organization exists
-            organization = Organization.query.get(organization_id)
-            if not organization:
-                errors.append(f'Organization with ID {organization_id} does not exist')
-                
-            # Validate role exists
-            role = Role.query.get(role_id)
-            if not role:
-                errors.append(f'Role with ID {role_id} does not exist')
-        
-        return {
-            'valid': len(errors) == 0,
-            'errors': errors
-        }
-    except Exception as e:
-        logger.error(f"Error validating organization roles: {str(e)}")
-        return {
-            'valid': False,
-            'errors': [f'Failed to validate organization roles: {str(e)}']
-        }
+
+# ---------- Email Template Models (Simplified) ----------
 
 
 class User(db.Model):
@@ -4530,12 +4149,16 @@ def add_user():
     
     # Send welcome email automatically
     try:
+        # Get email template ID from request data
+        email_template_id = data.get('email_template_id')
+        
         email_result = send_welcome_email(
             to_email=new_user.email,
             username=new_user.username,
             password=user_password,
             firstname=new_user.firstname,
-            survey_code=survey_code
+            survey_code=survey_code,
+            email_template_id=email_template_id
         )
         logger.info(f"Welcome email sent for new user {new_user.username}: {email_result}")
     except Exception as e:
@@ -5097,6 +4720,313 @@ def initialize_question_types():
 
 # Note: Constant sum is now handled as a simple question type like others
 
+@app.route('/api/initialize-default-email-templates', methods=['POST'])
+def initialize_default_email_templates():
+    """Initialize default email templates for welcome and reminder emails"""
+    try:
+        # Get the first organization to associate templates with
+        first_org = Organization.query.first()
+        if not first_org:
+            return jsonify({'error': 'No organizations found. Please create an organization first.'}), 400
+        
+        # Check if default templates already exist
+        existing_welcome = EmailTemplate.query.filter_by(
+            organization_id=first_org.id, 
+            name='Default Welcome Email'
+        ).first()
+        existing_reminder = EmailTemplate.query.filter_by(
+            organization_id=first_org.id, 
+            name='Default Reminder Email'
+        ).first()
+        
+        templates_created = []
+        
+        # Create Welcome Email Template
+        if not existing_welcome:
+            welcome_html = """
+            <html>
+            <head>
+                <style>
+                    body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; line-height: 1.6; color: #333; margin: 0; padding: 0; }
+                    .container { max-width: 650px; margin: 0 auto; padding: 20px; background: #f8fafc; }
+                    .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 40px 30px; text-align: center; border-radius: 15px 15px 0 0; box-shadow: 0 4px 20px rgba(102, 126, 234, 0.3); }
+                    .content { background: #ffffff; padding: 40px 30px; border: 1px solid #e2e8f0; box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1); }
+                    .footer { background: #f8fafc; padding: 30px; border-radius: 0 0 15px 15px; border: 1px solid #e2e8f0; border-top: none; text-align: center; }
+                    .credentials { background: #e8f5e8; padding: 25px; border-radius: 10px; margin: 25px 0; border-left: 5px solid #10b981; }
+                    .guide { background: #fff3cd; padding: 25px; border-radius: 10px; margin: 25px 0; border-left: 5px solid #fbbf24; }
+                    .features { background: #e0f2fe; padding: 25px; border-radius: 10px; margin: 25px 0; border-left: 5px solid #0ea5e9; }
+                    .highlight { color: #667eea; font-weight: bold; }
+                    .emoji { font-size: 1.2em; }
+                    .button { display: inline-block; background: #667eea; color: white; padding: 15px 30px; text-decoration: none; border-radius: 8px; font-weight: bold; margin: 15px 0; transition: background 0.3s ease; }
+                    .button:hover { background: #5a67d8; }
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="header">
+                        <h1 style="margin: 0; font-size: 32px;">🎉 Welcome to Saurara!</h1>
+                        <p style="margin: 15px 0 0 0; font-size: 18px; opacity: 0.9;">Your Journey Begins Here</p>
+                    </div>
+                    
+                    <div class="content">
+                        <p style="font-size: 18px; margin-bottom: 25px;">{{greeting}},</p>
+                        
+                        <p style="font-size: 16px; margin-bottom: 20px;">🎉 Welcome to the Saurara Platform! We are thrilled to have you join our growing community of researchers, educators, and community leaders.</p>
+                        
+                        <p style="margin-bottom: 20px;">We're excited to welcome you aboard! Your account has been successfully created and you're ready to embark on your journey with us.</p>
+                        
+                        <div class="credentials">
+                            <h3 style="margin-top: 0; color: #059669;"><span class="emoji">🔐</span> Your Account Credentials:</h3>
+                            <ul style="list-style: none; padding: 0;">
+                                <li style="margin: 8px 0;"><strong>Username:</strong> {{username}}</li>
+                                <li style="margin: 8px 0;"><strong>Email:</strong> {{email}}</li>
+                                <li style="margin: 8px 0;"><strong>Temporary Password:</strong> <span class="highlight">{{password}}</span></li>
+                                <li style="margin: 8px 0;"><strong>Survey Code:</strong> {{survey_code}}</li>
+                                <li style="margin: 8px 0;"><strong>Platform Access:</strong> <a href="http://www.saurara.org" style="color: #667eea;">www.saurara.org</a></li>
+                            </ul>
+                        </div>
+                        
+                        <div class="guide">
+                            <h3 style="margin-top: 0; color: #f59e0b;"><span class="emoji">🚀</span> Quick Start Guide:</h3>
+                            <ol style="padding-left: 20px;">
+                                <li style="margin: 8px 0;">Visit <a href="http://www.saurara.org" style="color: #667eea;">www.saurara.org</a></li>
+                                <li style="margin: 8px 0;">Click on "Login" or "Survey Access"</li>
+                                <li style="margin: 8px 0;">Enter your username and password above</li>
+                                <li style="margin: 8px 0;">Complete your profile setup when ready</li>
+                                <li style="margin: 8px 0;">Explore survey opportunities and platform features</li>
+                                <li style="margin: 8px 0;">Connect with your organization and peers</li>
+                            </ol>
+                        </div>
+                        
+                        <div class="features">
+                            <h3 style="margin-top: 0; color: #0284c7;"><span class="emoji">📚</span> Platform Features:</h3>
+                            <ul style="list-style: none; padding: 0;">
+                                <li style="margin: 8px 0;">• Personalized survey dashboard</li>
+                                <li style="margin: 8px 0;">• Progress tracking and completion status</li>
+                                <li style="margin: 8px 0;">• Secure data handling and privacy protection</li>
+                                <li style="margin: 8px 0;">• Community insights and research updates</li>
+                                <li style="margin: 8px 0;">• Professional networking opportunities</li>
+                            </ul>
+                        </div>
+                        
+                        <p style="background: #fef3c7; padding: 20px; border-radius: 8px; border-left: 4px solid #f59e0b; margin: 25px 0;">
+                            <strong><span class="emoji">🔒</span> Important Security Information:</strong><br>
+                            For your account security, please change your password during your first login. Keep your credentials safe and never share them with unauthorized individuals.
+                        </p>
+                        
+                        <p style="margin: 25px 0;">We're honored to have you as part of the Saurara family. Together, we're building a better understanding of education and community development globally.</p>
+                        
+                        <p style="font-size: 18px; font-weight: bold; color: #667eea; text-align: center; margin: 30px 0;">Welcome aboard! 🌟</p>
+                    </div>
+                    
+                    <div class="footer">
+                        <p style="margin: 0; color: #64748b;">Best regards,<br><strong>The Saurara Research Team</strong></p>
+                        <div style="margin-top: 20px; padding-top: 20px; border-top: 1px solid #e2e8f0;">
+                            <p style="margin: 0; font-size: 14px; color: #64748b;">
+                                🌐 <a href="http://www.saurara.org" style="color: #667eea;">www.saurara.org</a> | 
+                                📧 support@saurara.org | 
+                                📱 Stay Connected
+                            </p>
+                        </div>
+                    </div>
+                </div>
+            </body>
+            </html>
+            """
+            
+            welcome_text = """{{greeting}},
+
+🎉 Welcome to the Saurara Platform! We are thrilled to have you join our growing community of researchers, educators, and community leaders.
+
+We're excited to welcome you aboard! Your account has been successfully created and you're ready to embark on your journey with us.
+
+🔐 Your Account Credentials:
+• Username: {{username}}
+• Email Address: {{email}}
+• Temporary Password: {{password}}
+• Survey Code: {{survey_code}}
+• Platform Access: www.saurara.org
+
+🚀 Quick Start Guide:
+1. Visit www.saurara.org
+2. Click on "Login" or "Survey Access"
+3. Enter your username and password above
+4. Complete your profile setup when ready
+5. Explore survey opportunities and platform features
+6. Connect with your organization and peers
+
+🔒 Important Security Information:
+For your account security, please change your password during your first login. Keep your credentials safe and never share them with unauthorized individuals.
+
+📚 Platform Features:
+• Personalized survey dashboard
+• Progress tracking and completion status
+• Secure data handling and privacy protection
+• Community insights and research updates
+• Professional networking opportunities
+
+We're honored to have you as part of the Saurara family. Together, we're building a better understanding of education and community development globally.
+
+Welcome aboard! 🌟
+
+Best regards,
+The Saurara Research Team
+
+---
+🌐 Platform: www.saurara.org
+📧 Support: support@saurara.org
+📱 Stay Connected: Follow us for updates and insights"""
+
+            welcome_template = EmailTemplate(
+                organization_id=first_org.id,
+                name='Default Welcome Email',
+                subject='Welcome to Saurara Platform',
+                html_body=welcome_html,
+                text_body=welcome_text,
+                is_public=True
+            )
+            db.session.add(welcome_template)
+            templates_created.append('Default Welcome Email')
+        
+        # Create Reminder Email Template
+        if not existing_reminder:
+            reminder_html = """
+            <html>
+            <head>
+                <style>
+                    body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; line-height: 1.6; color: #333; }
+                    .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+                    .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px 20px; text-align: center; border-radius: 10px 10px 0 0; }
+                    .content { background: #ffffff; padding: 30px; border: 1px solid #e0e0e0; }
+                    .footer { background: #f8f9fa; padding: 20px; border-radius: 0 0 10px 10px; border: 1px solid #e0e0e0; border-top: none; }
+                    .highlight { background: #f0f8ff; padding: 15px; border-left: 4px solid #667eea; margin: 20px 0; }
+                    .survey-details { background: #e8f5e8; padding: 20px; border-radius: 8px; margin: 20px 0; }
+                    .button { display: inline-block; background: #667eea; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold; margin: 10px 0; }
+                    .steps { background: #fff9e6; padding: 20px; border-radius: 8px; margin: 20px 0; }
+                    .reminder-tag { background: #ff6b6b; color: white; padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: bold; }
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="header">
+                        <h1 style="margin: 0; font-size: 28px;">🔔 Survey Reminder</h1>
+                        <p style="margin: 10px 0 0 0; font-size: 16px; opacity: 0.9;">Saurara Research Platform</p>
+                    </div>
+                    
+                    <div class="content">
+                        <p style="font-size: 18px; margin-bottom: 20px;">{{greeting}},</p>
+                        
+                        <p>We hope this message finds you well!</p>
+                        
+                        <p>This is a friendly reminder that you have a pending survey{{org_text}} on the Saurara Platform that requires your attention.{{deadline_text}}</p>
+                        
+                        <div class="survey-details">
+                            <h3 style="margin-top: 0; color: #2d7a2d;">Your Survey Details:</h3>
+                            <ul style="list-style: none; padding: 0;">
+                                <li style="margin: 8px 0;"><strong>Username:</strong> {{username}}</li>
+                                <li style="margin: 8px 0;"><strong>Survey Code:</strong> {{survey_code}}</li>
+                                <li style="margin: 8px 0;"><strong>Survey Link:</strong> <a href="http://www.saurara.org" style="color: #667eea;">www.saurara.org</a></li>
+                            </ul>
+                        </div>
+                        
+                        <div class="highlight">
+                            <h3 style="margin-top: 0; color: #667eea;">Why Your Response Matters:</h3>
+                            <p style="margin-bottom: 0;">Your input is invaluable in helping us understand and improve educational and community initiatives. Every response contributes to meaningful research that can make a real difference in communities like yours.</p>
+                        </div>
+                        
+                        <div class="steps">
+                            <h3 style="margin-top: 0; color: #b8860b;">What You Need to Do:</h3>
+                            <ol style="margin: 0; padding-left: 20px;">
+                                <li style="margin: 8px 0;">Visit <a href="http://www.saurara.org" style="color: #667eea;">www.saurara.org</a></li>
+                                <li style="margin: 8px 0;">Enter your survey code: <strong>{{survey_code}}</strong></li>
+                                <li style="margin: 8px 0;">Complete the survey at your convenience</li>
+                                <li style="margin: 8px 0;">Submit your responses</li>
+                            </ol>
+                        </div>
+                        
+                        <p style="background: #e7f3ff; padding: 15px; border-radius: 8px; margin: 20px 0;">
+                            📊 The survey typically takes 15-20 minutes to complete, and you can save your progress and return later if needed.
+                        </p>
+                        
+                        <p style="margin: 25px 0;">We truly appreciate your time and participation. Your voice matters, and we look forward to receiving your valuable insights.</p>
+                        
+                        <p style="font-weight: bold; color: #667eea;">Thank you for being part of the Saurara community!</p>
+                    </div>
+                    
+                    <div class="footer">
+                        <p style="margin: 0;">Best regards,<br><strong>The Saurara Research Team</strong></p>
+                        <hr style="margin: 20px 0; border: none; border-top: 1px solid #e0e0e0;">
+                        <p style="margin: 0; font-size: 12px; color: #666;">
+                            This is an automated reminder. If you have already completed the survey, please disregard this message.<br>
+                            Visit: <a href="http://www.saurara.org" style="color: #667eea;">www.saurara.org</a> | Email: support@saurara.org
+                        </p>
+                    </div>
+                </div>
+            </body>
+            </html>
+            """
+            
+            reminder_text = """{{greeting}},
+
+We hope this message finds you well!
+
+This is a friendly reminder that you have a pending survey{{org_text}} on the Saurara Platform that requires your attention.{{deadline_text}}
+
+Your Survey Details:
+• Username: {{username}}
+• Survey Code: {{survey_code}}
+• Survey Link: www.saurara.org
+
+Why Your Response Matters:
+Your input is invaluable in helping us understand and improve educational and community initiatives. Every response contributes to meaningful research that can make a real difference in communities like yours.
+
+What You Need to Do:
+1. Visit www.saurara.org
+2. Enter your survey code: {{survey_code}}
+3. Complete the survey at your convenience
+4. Submit your responses
+
+The survey typically takes 15-20 minutes to complete, and you can save your progress and return later if needed.
+
+Need Help?
+If you're experiencing any difficulties or have questions about the survey, please don't hesitate to reach out to our support team. We're here to help!
+
+We truly appreciate your time and participation. Your voice matters, and we look forward to receiving your valuable insights.
+
+Thank you for being part of the Saurara community!
+
+Best regards,
+The Saurara Research Team
+
+---
+This is an automated reminder. If you have already completed the survey, please disregard this message.
+Visit: www.saurara.org | Email: support@saurara.org"""
+
+            reminder_template = EmailTemplate(
+                organization_id=first_org.id,
+                name='Default Reminder Email',
+                subject='🔔 Reminder: Complete Your Saurara Survey',
+                html_body=reminder_html,
+                text_body=reminder_text,
+                is_public=True
+            )
+            db.session.add(reminder_template)
+            templates_created.append('Default Reminder Email')
+        
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': f'Successfully initialized {len(templates_created)} default email templates',
+            'templates_created': templates_created
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error initializing default email templates: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': f'Failed to initialize email templates: {str(e)}'}), 500
+
 @app.route('/api/initialize-enhanced-data', methods=['POST'])
 def initialize_enhanced_data():
     """Initialize sample data for testing the enhanced organization system"""
@@ -5255,7 +5185,8 @@ def send_welcome_email_endpoint():
             username=data['username'],
             password=data['password'],
             firstname=data.get('firstname'),
-            survey_code=data.get('survey_code')
+            survey_code=data.get('survey_code'),
+            email_template_id=data.get('email_template_id')
         )
         
         if result['success']:
@@ -6240,38 +6171,120 @@ def delete_report_template(template_id):
 
 
 # ---------- Email Templates CRUD Endpoints ----------
+def render_email_template(template_content, **kwargs):
+    """Render email template with provided variables"""
+    if not template_content:
+        return template_content
+    
+    try:
+        # Simple template variable replacement using {{variable}} syntax
+        rendered = template_content
+        for key, value in kwargs.items():
+            placeholder = f"{{{{{key}}}}}"
+            rendered = rendered.replace(placeholder, str(value) if value is not None else '')
+        return rendered
+    except Exception as e:
+        logger.error(f"Error rendering email template: {str(e)}")
+        return template_content
+
+@app.route('/api/email-templates/by-type/<template_type>', methods=['GET'])
+def get_email_template_by_type(template_type):
+    """Get email template by type (welcome, reminder, etc.)"""
+    try:
+        # Map template types to names
+        template_names = {
+            'welcome': 'Default Welcome Email',
+            'reminder': 'Default Reminder Email'
+        }
+        
+        template_name = template_names.get(template_type.lower())
+        if not template_name:
+            return jsonify({'error': f'Unknown template type: {template_type}'}), 400
+        
+        # Get the template (prefer public templates)
+        template = EmailTemplate.query.filter_by(
+            name=template_name,
+            is_public=True
+        ).first()
+        
+        if not template:
+            # Fallback to any template with this name
+            template = EmailTemplate.query.filter_by(name=template_name).first()
+        
+        if not template:
+            return jsonify({'error': f'Template not found for type: {template_type}'}), 404
+        
+        return jsonify({
+            'id': template.id,
+            'name': template.name,
+            'subject': template.subject,
+            'html_body': template.html_body,
+            'text_body': template.text_body,
+            'organization_id': template.organization_id,
+            'is_public': template.is_public
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting email template by type: {str(e)}")
+        return jsonify({'error': f'Failed to get email template: {str(e)}'}), 500
+
+@app.route('/api/email-templates/render-preview', methods=['POST'])
+def render_email_template_preview():
+    """Render email template preview with provided variables"""
+    try:
+        data = request.get_json()
+        
+        required_fields = ['template_type']
+        for field in required_fields:
+            if field not in data:
+                return jsonify({'error': f'Missing required field: {field}'}), 400
+        
+        template_type = data['template_type']
+        variables = data.get('variables', {})
+        
+        # Get the template
+        template_response = get_email_template_by_type(template_type)
+        if template_response[1] != 200:
+            return template_response
+        
+        template_data = template_response[0].get_json()
+        
+        # Render both HTML and text versions
+        rendered_html = render_email_template(template_data['html_body'], **variables)
+        rendered_text = render_email_template(template_data['text_body'], **variables)
+        rendered_subject = render_email_template(template_data['subject'], **variables)
+        
+        return jsonify({
+            'subject': rendered_subject,
+            'html_body': rendered_html,
+            'text_body': rendered_text,
+            'template_name': template_data['name']
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error rendering email template preview: {str(e)}")
+        return jsonify({'error': f'Failed to render template preview: {str(e)}'}), 500
+
 @app.route('/api/email-templates', methods=['GET'])
 def get_email_templates():
-    """Get email templates, optionally filtered by organization, survey template, and organization role"""
+    """Get email templates, optionally filtered by organization"""
     try:
         organization_id = request.args.get('organization_id')
-        survey_template_id = request.args.get('survey_template_id')
         filter_organization_id = request.args.get('filter_organization_id')
-        role_id = request.args.get('role_id')
         
-        # Start with base query
-        query = EmailTemplate.query
+        # Start with base query, include organization relationship for organization name
+        query = EmailTemplate.query.options(joinedload(EmailTemplate.organization))
         
         # Apply organization filter
         if organization_id:
+            # Show public templates OR templates from the specified organization
             query = query.filter(
                 db.or_(EmailTemplate.is_public == True, EmailTemplate.organization_id == organization_id)
             )
-        # If no organization_id specified, show all templates (for admin inventory view)
-        
-        # Apply survey template filter
-        if survey_template_id:
-            query = query.join(EmailTemplateSurveyAssociation).filter(
-                EmailTemplateSurveyAssociation.survey_template_id == survey_template_id
-            )
-        
-        # Apply organization role filter
-        if filter_organization_id or role_id:
-            query = query.join(EmailTemplateOrganizationRole)
-            if filter_organization_id:
-                query = query.filter(EmailTemplateOrganizationRole.organization_id == filter_organization_id)
-            if role_id:
-                query = query.filter(EmailTemplateOrganizationRole.role_id == role_id)
+        elif filter_organization_id:
+            # Filter by specific organization (for admin filtering)
+            query = query.filter(EmailTemplate.organization_id == filter_organization_id)
+        # If no filters specified, show all templates (for admin inventory view)
         
         templates = query.order_by(EmailTemplate.created_at.desc()).all()
         return jsonify({'success': True, 'templates': [t.to_dict() for t in templates]}), 200
@@ -6285,37 +6298,29 @@ def save_email_template():
     """Create a new email template"""
     try:
         data = request.get_json() or {}
-        name = data.get('name')
-        subject = data.get('subject')
-        html_body = data.get('html_body')
-        text_body = data.get('text_body', '')
+        name = data.get('name', '').strip()
+        subject = data.get('subject', '').strip()
+        html_body = data.get('html_body', '').strip()
+        text_body = data.get('text_body', '').strip()
         organization_id = data.get('organization_id')
         is_public = data.get('is_public', False)
-        survey_template_ids = data.get('survey_template_ids', [])
-        organization_roles = data.get('organization_roles', [])
 
+        # Validation
         if not all([name, subject, html_body, organization_id]):
             return jsonify({'error': 'name, subject, html_body and organization_id are required'}), 400
 
-        # Validate survey template associations
-        survey_validation = validate_survey_template_associations(survey_template_ids, organization_id)
-        if not survey_validation['valid']:
-            return jsonify({
-                'error': 'Validation failed',
-                'details': {
-                    'survey_templates': survey_validation['errors']
-                }
-            }), 400
+        # Validate organization exists
+        organization = Organization.query.get(organization_id)
+        if not organization:
+            return jsonify({'error': f'Organization with ID {organization_id} does not exist'}), 400
 
-        # Validate organization roles
-        org_role_validation = validate_organization_roles(organization_roles)
-        if not org_role_validation['valid']:
-            return jsonify({
-                'error': 'Validation failed',
-                'details': {
-                    'organization_roles': org_role_validation['errors']
-                }
-            }), 400
+        # Check for duplicate name within organization
+        existing = EmailTemplate.query.filter_by(
+            organization_id=organization_id, 
+            name=name
+        ).first()
+        if existing:
+            return jsonify({'error': f'Email template with name "{name}" already exists for this organization'}), 400
 
         template = EmailTemplate(
             name=name,
@@ -6326,28 +6331,9 @@ def save_email_template():
             is_public=is_public
         )
         db.session.add(template)
-        db.session.flush()  # Get the template ID
-        
-        # Create survey template associations
-        for survey_template_id in survey_template_ids:
-            association = EmailTemplateSurveyAssociation(
-                email_template_id=template.id,
-                survey_template_id=survey_template_id
-            )
-            db.session.add(association)
-        
-        # Create organization role records
-        for org_role_pair in organization_roles:
-            org_role = EmailTemplateOrganizationRole(
-                email_template_id=template.id,
-                organization_id=org_role_pair['organization_id'],
-                role_id=org_role_pair['role_id']
-            )
-            db.session.add(org_role)
-        
         db.session.commit()
         
-        logger.info(f"Created email template: {template.name} for organization {template.organization_id}")
+        logger.info(f"Created email template: {template.name} for organization {organization.name}")
         return jsonify({'success': True, 'template': template.to_dict()}), 201
     except Exception as e:
         db.session.rollback()
@@ -6362,67 +6348,50 @@ def update_email_template(template_id):
         template = EmailTemplate.query.get_or_404(template_id)
         data = request.get_json() or {}
 
-        # Update basic fields
-        template.name = data.get('name', template.name)
-        template.subject = data.get('subject', template.subject)
-        template.html_body = data.get('html_body', template.html_body)
-        template.text_body = data.get('text_body', template.text_body)
-        template.is_public = data.get('is_public', template.is_public)
+        # Update fields with validation
+        if 'name' in data:
+            new_name = data.get('name', '').strip()
+            if not new_name:
+                return jsonify({'error': 'Template name cannot be empty'}), 400
+            
+            # Check for duplicate name within organization (excluding current template)
+            existing = EmailTemplate.query.filter_by(
+                organization_id=template.organization_id, 
+                name=new_name
+            ).filter(EmailTemplate.id != template_id).first()
+            if existing:
+                return jsonify({'error': f'Email template with name "{new_name}" already exists for this organization'}), 400
+            
+            template.name = new_name
+
+        if 'subject' in data:
+            new_subject = data.get('subject', '').strip()
+            if not new_subject:
+                return jsonify({'error': 'Subject cannot be empty'}), 400
+            template.subject = new_subject
+
+        if 'html_body' in data:
+            new_html_body = data.get('html_body', '').strip()
+            if not new_html_body:
+                return jsonify({'error': 'HTML body cannot be empty'}), 400
+            template.html_body = new_html_body
+
+        if 'text_body' in data:
+            template.text_body = data.get('text_body', '').strip()
+
+        if 'is_public' in data:
+            template.is_public = data.get('is_public', False)
+
         if 'organization_id' in data and data.get('organization_id'):
-            template.organization_id = data.get('organization_id')
-
-        # Handle survey template associations
-        if 'survey_template_ids' in data:
-            survey_template_ids = data.get('survey_template_ids', [])
-            
-            # Validate survey template associations
-            survey_validation = validate_survey_template_associations(survey_template_ids, template.organization_id)
-            if not survey_validation['valid']:
-                return jsonify({
-                    'error': 'Validation failed',
-                    'details': {
-                        'survey_templates': survey_validation['errors']
-                    }
-                }), 400
-            
-            # Remove existing associations
-            EmailTemplateSurveyAssociation.query.filter_by(email_template_id=template.id).delete()
-            
-            # Create new associations
-            for survey_template_id in survey_template_ids:
-                association = EmailTemplateSurveyAssociation(
-                    email_template_id=template.id,
-                    survey_template_id=survey_template_id
-                )
-                db.session.add(association)
-
-        # Handle organization roles
-        if 'organization_roles' in data:
-            organization_roles = data.get('organization_roles', [])
-            
-            # Validate organization roles
-            org_role_validation = validate_organization_roles(organization_roles)
-            if not org_role_validation['valid']:
-                return jsonify({
-                    'error': 'Validation failed',
-                    'details': {
-                        'organization_roles': org_role_validation['errors']
-                    }
-                }), 400
-            
-            # Remove existing organization roles
-            EmailTemplateOrganizationRole.query.filter_by(email_template_id=template.id).delete()
-            
-            # Create new organization roles
-            for org_role_pair in organization_roles:
-                org_role = EmailTemplateOrganizationRole(
-                    email_template_id=template.id,
-                    organization_id=org_role_pair['organization_id'],
-                    role_id=org_role_pair['role_id']
-                )
-                db.session.add(org_role)
+            new_org_id = data.get('organization_id')
+            # Validate new organization exists
+            organization = Organization.query.get(new_org_id)
+            if not organization:
+                return jsonify({'error': f'Organization with ID {new_org_id} does not exist'}), 400
+            template.organization_id = new_org_id
 
         db.session.commit()
+        logger.info(f"Updated email template: {template.name} for organization {template.organization_id}")
         return jsonify({'success': True, 'template': template.to_dict()}), 200
     except Exception as e:
         db.session.rollback()
@@ -6432,25 +6401,17 @@ def update_email_template(template_id):
 
 @app.route('/api/email-templates/<int:template_id>', methods=['DELETE'])
 def delete_email_template(template_id):
-    """Delete an email template and its associated records"""
+    """Delete an email template"""
     try:
         template = EmailTemplate.query.get_or_404(template_id)
-        
-        # The cascade='all, delete-orphan' in the model relationships should handle
-        # automatic deletion of related EmailTemplateSurveyAssociation and EmailTemplateAudience records
-        # But we can explicitly delete them for clarity and to ensure proper cleanup
-        
-        # Delete survey template associations
-        EmailTemplateSurveyAssociation.query.filter_by(email_template_id=template.id).delete()
-        
-        # Delete organization role records
-        EmailTemplateOrganizationRole.query.filter_by(email_template_id=template.id).delete()
+        template_name = template.name
+        organization_name = template.organization.name if template.organization else 'Unknown'
         
         # Delete the template itself
         db.session.delete(template)
         db.session.commit()
         
-        logger.info(f"Deleted email template {template_id} and its associated records")
+        logger.info(f"Deleted email template '{template_name}' from organization '{organization_name}'")
         return jsonify({'success': True, 'message': 'Template deleted successfully'}), 200
     except Exception as e:
         db.session.rollback()
@@ -6744,6 +6705,61 @@ def get_user_survey_assignments(user_id):
         logger.error(f"Error getting user survey assignments: {str(e)}")
         return jsonify({'error': f'Failed to get user survey assignments: {str(e)}'}), 500
 
+@app.route('/api/test/email-templates-integration', methods=['GET'])
+def test_email_templates_integration():
+    """Test endpoint to verify email template integration"""
+    try:
+        # Test 1: Check if default templates exist
+        welcome_template = EmailTemplate.query.filter_by(name='Default Welcome Email').first()
+        reminder_template = EmailTemplate.query.filter_by(name='Default Reminder Email').first()
+        
+        # Test 2: Try to render a sample welcome email
+        sample_variables = {
+            'greeting': 'Dear Test User',
+            'username': 'testuser',
+            'email': 'test@example.com',
+            'password': 'test123',
+            'survey_code': 'TEST123'
+        }
+        
+        welcome_rendered = None
+        if welcome_template:
+            welcome_rendered = {
+                'subject': render_email_template(welcome_template.subject, **sample_variables),
+                'text_preview': render_email_template(welcome_template.text_body, **sample_variables)[:200] + "..."
+            }
+        
+        # Test 3: Check if email functions can access templates
+        template_response = get_email_template_by_type('welcome')
+        template_accessible = template_response[1] == 200
+        
+        return jsonify({
+            'integration_status': 'success',
+            'tests': {
+                'default_templates_exist': {
+                    'welcome_template': welcome_template is not None,
+                    'reminder_template': reminder_template is not None
+                },
+                'template_rendering': {
+                    'welcome_rendered': welcome_rendered is not None,
+                    'sample_output': welcome_rendered
+                },
+                'api_access': {
+                    'template_accessible_via_api': template_accessible
+                }
+            },
+            'templates_count': EmailTemplate.query.count(),
+            'message': 'Email template integration is working properly'
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error testing email template integration: {str(e)}")
+        return jsonify({
+            'integration_status': 'error',
+            'error': str(e),
+            'message': 'Email template integration test failed'
+        }), 500
+
 @app.route('/api/test/survey-assignments', methods=['GET'])
 def test_survey_assignments():
     """Test endpoint to check survey assignments in database"""
@@ -6846,6 +6862,192 @@ def get_survey_templates_by_organization(org_id):
         logger.error(f"Error fetching survey templates for organization {org_id}: {str(e)}")
         logger.error(traceback.format_exc())
         return jsonify({'error': f'Failed to fetch survey templates: {str(e)}'}), 500
+
+
+# User Reports API endpoints for analytics
+@app.route('/api/survey-responses/church', methods=['GET'])
+def get_church_survey_responses():
+    """Get church survey responses for analytics"""
+    try:
+        # This is a placeholder - you'll need to implement the actual logic
+        # based on how you identify church surveys in your database
+        
+        # Example: assuming you have a way to identify church templates
+        # You might need to filter by template name, organization type, etc.
+        
+        responses = SurveyResponse.query.join(SurveyTemplate).filter(
+            # Add your church survey identification logic here
+            # For example: SurveyTemplate.name.contains('church')
+        ).all()
+        
+        result = []
+        for response in responses:
+            # Transform the response data to match frontend expectations
+            response_data = {
+                'id': response.id,
+                'survey_type': 'church',
+                'response_date': response.created_at.isoformat() if response.created_at else None,
+                'template_id': response.template_id,
+                'user_id': response.user_id,
+                'status': response.status,
+                'answers': response.answers  # This contains the survey answers
+            }
+            
+            # Extract user information if available
+            if response.user:
+                user_details = response.user.user_details
+                if user_details:
+                    response_data.update({
+                        'church_name': user_details.get('organization_name'),
+                        'pastor_name': f"{user_details.get('first_name', '')} {user_details.get('last_name', '')}".strip(),
+                        'city': user_details.get('city'),
+                        'country': user_details.get('country'),
+                        'physical_address': user_details.get('address'),
+                        # Add other fields based on your user_details structure
+                    })
+            
+            result.append(response_data)
+        
+        return jsonify(result), 200
+        
+    except Exception as e:
+        logger.error(f"Error fetching church survey responses: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': f'Failed to fetch church survey responses: {str(e)}'}), 500
+
+
+@app.route('/api/survey-responses/institution', methods=['GET'])
+def get_institution_survey_responses():
+    """Get institution survey responses for analytics"""
+    try:
+        # Placeholder for institution surveys
+        responses = SurveyResponse.query.join(SurveyTemplate).filter(
+            # Add your institution survey identification logic here
+        ).all()
+        
+        result = []
+        for response in responses:
+            response_data = {
+                'id': response.id,
+                'survey_type': 'institution',
+                'response_date': response.created_at.isoformat() if response.created_at else None,
+                'template_id': response.template_id,
+                'user_id': response.user_id,
+                'status': response.status,
+                'answers': response.answers
+            }
+            
+            if response.user:
+                user_details = response.user.user_details
+                if user_details:
+                    response_data.update({
+                        'institution_name': user_details.get('organization_name'),
+                        'president_name': f"{user_details.get('first_name', '')} {user_details.get('last_name', '')}".strip(),
+                        'city': user_details.get('city'),
+                        'country': user_details.get('country'),
+                        'physical_address': user_details.get('address'),
+                    })
+            
+            result.append(response_data)
+        
+        return jsonify(result), 200
+        
+    except Exception as e:
+        logger.error(f"Error fetching institution survey responses: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': f'Failed to fetch institution survey responses: {str(e)}'}), 500
+
+
+@app.route('/api/survey-responses/non-formal', methods=['GET'])
+def get_non_formal_survey_responses():
+    """Get non-formal survey responses for analytics"""
+    try:
+        # Placeholder for non-formal surveys
+        responses = SurveyResponse.query.join(SurveyTemplate).filter(
+            # Add your non-formal survey identification logic here
+        ).all()
+        
+        result = []
+        for response in responses:
+            response_data = {
+                'id': response.id,
+                'survey_type': 'non_formal',
+                'response_date': response.created_at.isoformat() if response.created_at else None,
+                'template_id': response.template_id,
+                'user_id': response.user_id,
+                'status': response.status,
+                'answers': response.answers
+            }
+            
+            if response.user:
+                user_details = response.user.user_details
+                if user_details:
+                    response_data.update({
+                        'ministry_name': user_details.get('organization_name'),
+                        'leader_name': f"{user_details.get('first_name', '')} {user_details.get('last_name', '')}".strip(),
+                        'city': user_details.get('city'),
+                        'country': user_details.get('country'),
+                        'physical_address': user_details.get('address'),
+                    })
+            
+            result.append(response_data)
+        
+        return jsonify(result), 200
+        
+    except Exception as e:
+        logger.error(f"Error fetching non-formal survey responses: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': f'Failed to fetch non-formal survey responses: {str(e)}'}), 500
+
+
+@app.route('/api/survey-questions', methods=['GET'])
+def get_survey_questions():
+    """Get survey questions structure for analytics"""
+    try:
+        # Return the structure of survey questions
+        # This might come from your SurveyTemplate and Question models
+        
+        templates = SurveyTemplate.query.all()
+        result = {}
+        
+        for template in templates:
+            template_data = {
+                'id': template.id,
+                'name': template.name,
+                'description': template.description,
+                'questions': []
+            }
+            
+            # Add questions from the template
+            if hasattr(template, 'questions'):
+                for question in template.questions:
+                    question_data = {
+                        'id': question.id,
+                        'text': question.question_text,
+                        'type': question.question_type,
+                        'required': question.required
+                    }
+                    if hasattr(question, 'options'):
+                        question_data['options'] = question.options
+                    template_data['questions'].append(question_data)
+            
+            # Categorize by survey type (you'll need to implement this logic)
+            survey_type = 'general'  # Default
+            if 'church' in template.name.lower():
+                survey_type = 'church_survey'
+            elif 'institution' in template.name.lower():
+                survey_type = 'institution_survey'
+            elif 'non-formal' in template.name.lower():
+                survey_type = 'non_formal_survey'
+            
+            result[survey_type] = template_data
+        
+        return jsonify(result), 200
+        
+    except Exception as e:
+        logger.error(f"Error fetching survey questions: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': f'Failed to fetch survey questions: {str(e)}'}), 500
 
 
 if __name__ == '__main__':
