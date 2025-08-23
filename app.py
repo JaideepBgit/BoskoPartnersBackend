@@ -55,6 +55,20 @@ def load_ses_credentials():
         logger.error(f"Error loading SES credentials: {str(e)}")
         return None
 
+# Helper function to check email service status
+def is_email_service_active_for_organization(org_id):
+    """Check if email service is currently active for an organization"""
+    try:
+        org = Organization.query.get(org_id)
+        if not org:
+            return False, "Organization not found"
+        
+        # Email service is always active for existing organizations
+        return True, "Email service is active"
+    except Exception as e:
+        logger.error(f"Error checking email service status for organization {org_id}: {str(e)}")
+        return False, f"Error checking email service status: {str(e)}"
+
 # Initialize SES client
 def get_ses_client():
     """Initialize and return SES client"""
@@ -2874,7 +2888,8 @@ def get_organizations():
             'accreditation_status_or_body': org.details.get('accreditation_status_or_body') if org.details else None,
             'highest_level_of_education': org.highest_level_of_education,
             'affiliation_validation': org.details.get('affiliation_validation') if org.details else None,
-            'umbrella_association_membership': org.details.get('umbrella_association_membership') if org.details else None
+            'umbrella_association_membership': org.details.get('umbrella_association_membership') if org.details else None,
+
         }
         result.append(org_data)
     return jsonify(result)
@@ -2929,6 +2944,7 @@ def get_organization(org_id):
         'highest_level_of_education': org.highest_level_of_education,
         'affiliation_validation': org.details.get('affiliation_validation') if org.details else None,
         'umbrella_association_membership': org.details.get('umbrella_association_membership') if org.details else None,
+
         'misc': org.details,
         'created_at': org.created_at
     }
@@ -3084,6 +3100,8 @@ def add_organization():
                 lead_id = lead.id
                 logger.info(f"Created lead with ID: {lead_id} and username: {username}")
         
+
+        
         # Create the organization
         new_org = Organization(
             name=data['name'],
@@ -3212,6 +3230,8 @@ def update_organization(org_id):
             org.highest_level_of_education = data['highest_level_of_education']
         if 'misc' in data:
             org.details = data['misc']  # Maps to new 'details' column
+        
+
         
         # Update geo location if provided
         if 'geo_location' in data and data['geo_location']:
@@ -3550,6 +3570,57 @@ def update_organization_contacts(org_id):
         logger.error(traceback.format_exc())
         db.session.rollback()
         return jsonify({'error': f'Failed to update organization contacts: {str(e)}'}), 500
+
+# Organization Email Service Configuration Endpoints
+@app.route('/api/organizations/<int:org_id>/email-service-status', methods=['GET'])
+def get_organization_email_service_status(org_id):
+    """Get email service status for an organization"""
+    try:
+        org = Organization.query.get_or_404(org_id)
+        
+        # Email service is always active for existing organizations
+        return jsonify({
+            'success': True,
+            'isActive': True,
+            'message': "Email service is active",
+            'organization_id': org_id
+        }), 200
+    except Exception as e:
+        logger.error(f"Error getting email service status for organization {org_id}: {str(e)}")
+        return jsonify({'error': f'Failed to get email service status: {str(e)}'}), 500
+
+@app.route('/api/organizations/<int:org_id>/email-service-config', methods=['GET'])
+def get_organization_email_service_config(org_id):
+    """Get email service configuration for an organization"""
+    try:
+        org = Organization.query.get_or_404(org_id)
+        
+        return jsonify({
+            'success': True,
+            'organization_id': org_id,
+            'organization_name': org.name
+        }), 200
+    except Exception as e:
+        logger.error(f"Error getting email service config for organization {org_id}: {str(e)}")
+        return jsonify({'error': f'Failed to get email service config: {str(e)}'}), 500
+
+@app.route('/api/organizations/<int:org_id>/email-service-config', methods=['PUT'])
+def update_organization_email_service_config(org_id):
+    """Update email service configuration for an organization"""
+    try:
+        org = Organization.query.get_or_404(org_id)
+        
+        # Email service is always active, no configuration needed
+        return jsonify({
+            'success': True,
+            'message': 'Email service is always active for organizations',
+            'organization_id': org_id
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error updating email service config for organization {org_id}: {str(e)}")
+        return jsonify({'error': f'Failed to update email service config: {str(e)}'}), 500
 
 # User Organizational Roles API Endpoints
 @app.route('/api/user-organizational-roles', methods=['POST'])
@@ -5176,6 +5247,25 @@ def send_welcome_email_endpoint():
                 logger.error(f"Missing or empty field: {field}, value: {data.get(field)}")
                 return jsonify({'error': f'{field} is required and cannot be empty'}), 400
         
+        # Check if user has an organization and if email service is active
+        if data.get('user_id'):
+            user = User.query.get(data['user_id'])
+            if user and user.organization_id:
+                is_active, message = is_email_service_active_for_organization(user.organization_id)
+                if not is_active:
+                    return jsonify({
+                        'error': f'Email service not available for this organization: {message}',
+                        'organization_id': user.organization_id
+                    }), 403
+        elif data.get('organization_id'):
+            # If organization_id is provided directly, check its email service status
+            is_active, message = is_email_service_active_for_organization(data['organization_id'])
+            if not is_active:
+                return jsonify({
+                    'error': f'Email service not available for this organization: {message}',
+                    'organization_id': data['organization_id']
+                }), 403
+        
         # Log the password being sent (for debugging - remove in production)
         logger.info(f"Password being sent in welcome email: '{data['password']}'")
         
@@ -6556,6 +6646,15 @@ def assign_survey_to_user():
                     results['details'].append(user_result)
                     results['failed_assignments'] += 1
                     continue
+                
+                # Check if email service is active for user's organization
+                if user.organization_id:
+                    is_active, message = is_email_service_active_for_organization(user.organization_id)
+                    if not is_active:
+                        user_result['assignment_error'] = f'Email service not available for organization: {message}'
+                        results['details'].append(user_result)
+                        results['failed_assignments'] += 1
+                        continue
                 
                 # Use existing user survey code if available; otherwise, generate one and save to user
                 survey_code = user.survey_code or str(uuid.uuid4())
