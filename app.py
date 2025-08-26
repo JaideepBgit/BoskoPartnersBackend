@@ -997,15 +997,45 @@ Visit: www.saurara.org | Email: support@saurara.org"""
             'error': f"SMTP email sending failed: {str(e)}"
         }
 
-def send_reminder_email(to_email, username, survey_code, firstname=None, organization_name=None, days_remaining=None):
+def send_reminder_email(to_email, username, survey_code, firstname=None, organization_name=None, days_remaining=None, organization_id=None, template_id=None):
     """Send reminder email to user using database template (tries SES API first, falls back to SMTP)"""
     try:
         # Try to get reminder email template from database
-        template_response = get_email_template_by_type('reminder')
-        use_template = template_response[1] == 200
+        template = None
+        use_template = False
+        
+        # If specific template_id is provided, use that template
+        if template_id:
+            try:
+                template = EmailTemplate.query.get(template_id)
+                if template:
+                    template_data = {
+                        'name': template.name,
+                        'subject': template.subject,
+                        'html_body': template.html_body,
+                        'text_body': template.text_body
+                    }
+                    use_template = True
+                    logger.info(f"Using specific email template ID {template_id}: {template.name}")
+            except Exception as e:
+                logger.error(f"Error fetching specific email template {template_id}: {str(e)}")
+        
+        # If no specific template or template not found, use organization-aware lookup
+        if not use_template:
+            template, status_code, message = get_email_template_by_type_and_organization('reminder', organization_id)
+            use_template = status_code == 200
+            if use_template:
+                template_data = {
+                    'name': template.name,
+                    'subject': template.subject,
+                    'html_body': template.html_body,
+                    'text_body': template.text_body
+                }
+                logger.info(f"Using email template: {template.name} (Org: {template.organization_id})")
+            else:
+                logger.warning(f"No reminder template found for organization {organization_id}, using fallback")
         
         if use_template:
-            template_data = template_response[0].get_json()
             subject = template_data['subject']
             
             # Create personalized greeting and template variables
@@ -5421,7 +5451,9 @@ def send_reminder_email_endpoint():
             survey_code=data['survey_code'],
             firstname=data.get('firstname'),
             organization_name=data.get('organization_name'),
-            days_remaining=data.get('days_remaining')
+            days_remaining=data.get('days_remaining'),
+            organization_id=data.get('organization_id'),
+            template_id=data.get('template_id')
         )
         
         if result['success']:
@@ -5612,7 +5644,8 @@ def send_user_reminder_email(user_id):
             survey_code=user.survey_code,
             firstname=user.firstname,
             organization_name=user.organization.name if user.organization else None,
-            days_remaining=suggested_deadline
+            days_remaining=suggested_deadline,
+            organization_id=user.organization_id
         )
         
         if result['success']:
@@ -6277,9 +6310,8 @@ def render_email_template(template_content, **kwargs):
         logger.error(f"Error rendering email template: {str(e)}")
         return template_content
 
-@app.route('/api/email-templates/by-type/<template_type>', methods=['GET'])
-def get_email_template_by_type(template_type):
-    """Get email template by type (welcome, reminder, etc.)"""
+def get_email_template_by_type_and_organization(template_type, organization_id=None):
+    """Get email template by type with organization priority"""
     try:
         # Map template types to names
         template_names = {
@@ -6289,20 +6321,61 @@ def get_email_template_by_type(template_type):
         
         template_name = template_names.get(template_type.lower())
         if not template_name:
-            return jsonify({'error': f'Unknown template type: {template_type}'}), 400
+            return None, 400, f'Unknown template type: {template_type}'
         
-        # Get the template (prefer public templates)
-        template = EmailTemplate.query.filter_by(
-            name=template_name,
-            is_public=True
-        ).first()
+        template = None
         
+        # If organization_id is provided, look for organization-specific template first
+        if organization_id:
+            # Look for organization-specific template with similar naming patterns
+            org_templates = EmailTemplate.query.filter(
+                EmailTemplate.organization_id == organization_id,
+                db.or_(
+                    EmailTemplate.name.ilike(f'%{template_type}%'),
+                    EmailTemplate.name.ilike(f'%reminder%') if template_type.lower() == 'reminder' else False,
+                    EmailTemplate.name.ilike(f'%welcome%') if template_type.lower() == 'welcome' else False
+                )
+            ).all()
+            
+            if org_templates:
+                # Prefer exact match, then partial match
+                for tmpl in org_templates:
+                    if template_name.lower() in tmpl.name.lower():
+                        template = tmpl
+                        break
+                if not template:
+                    template = org_templates[0]  # Use first match if no exact match
+        
+        # If no organization-specific template found, look for public templates
         if not template:
-            # Fallback to any template with this name
+            template = EmailTemplate.query.filter_by(
+                name=template_name,
+                is_public=True
+            ).first()
+        
+        # Final fallback to any template with this name
+        if not template:
             template = EmailTemplate.query.filter_by(name=template_name).first()
         
         if not template:
-            return jsonify({'error': f'Template not found for type: {template_type}'}), 404
+            return None, 404, f'Template not found for type: {template_type}'
+        
+        return template, 200, 'success'
+        
+    except Exception as e:
+        logger.error(f"Error getting email template by type and organization: {str(e)}")
+        return None, 500, f'Failed to get email template: {str(e)}'
+
+@app.route('/api/email-templates/by-type/<template_type>', methods=['GET'])
+def get_email_template_by_type(template_type):
+    """Get email template by type (welcome, reminder, etc.)"""
+    try:
+        organization_id = request.args.get('organization_id', type=int)
+        
+        template, status_code, message = get_email_template_by_type_and_organization(template_type, organization_id)
+        
+        if status_code != 200:
+            return jsonify({'error': message}), status_code
         
         return jsonify({
             'id': template.id,
@@ -6318,26 +6391,114 @@ def get_email_template_by_type(template_type):
         logger.error(f"Error getting email template by type: {str(e)}")
         return jsonify({'error': f'Failed to get email template: {str(e)}'}), 500
 
+@app.route('/api/email-templates/public-reminder-templates', methods=['GET'])
+def get_public_reminder_templates():
+    """Get all public email templates that can be used for reminders"""
+    try:
+        # Get all public templates that could be used for reminders
+        templates = EmailTemplate.query.filter(
+            EmailTemplate.is_public == True,
+            db.or_(
+                EmailTemplate.name.ilike('%reminder%'),
+                EmailTemplate.name.ilike('%notification%'),
+                EmailTemplate.name.ilike('%survey%')
+            )
+        ).order_by(EmailTemplate.name).all()
+        
+        template_list = []
+        for template in templates:
+            template_list.append({
+                'id': template.id,
+                'name': template.name,
+                'subject': template.subject,
+                'organization_id': template.organization_id,
+                'organization_name': template.organization.name if template.organization else 'System Default'
+            })
+        
+        return jsonify({
+            'success': True,
+            'templates': template_list
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting public reminder templates: {str(e)}")
+        return jsonify({'error': f'Failed to get public reminder templates: {str(e)}'}), 500
+
+@app.route('/api/email-templates/public-welcome-templates', methods=['GET'])
+def get_public_welcome_templates():
+    """Get all public email templates that can be used for welcome emails"""
+    try:
+        # Get all public templates that could be used for welcome emails
+        templates = EmailTemplate.query.filter(
+            EmailTemplate.is_public == True,
+            db.or_(
+                EmailTemplate.name.ilike('%welcome%'),
+                EmailTemplate.name.ilike('%greeting%'),
+                EmailTemplate.name.ilike('%onboard%')
+            )
+        ).order_by(EmailTemplate.name).all()
+        
+        template_list = []
+        for template in templates:
+            template_list.append({
+                'id': template.id,
+                'name': template.name,
+                'subject': template.subject,
+                'organization_id': template.organization_id,
+                'organization_name': template.organization.name if template.organization else 'System Default'
+            })
+        
+        return jsonify({
+            'success': True,
+            'templates': template_list
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting public welcome templates: {str(e)}")
+        return jsonify({'error': f'Failed to get public welcome templates: {str(e)}'}), 500
+
 @app.route('/api/email-templates/render-preview', methods=['POST'])
 def render_email_template_preview():
     """Render email template preview with provided variables"""
     try:
         data = request.get_json()
         
-        required_fields = ['template_type']
-        for field in required_fields:
-            if field not in data:
-                return jsonify({'error': f'Missing required field: {field}'}), 400
+        # Support both template_type and template_id
+        template_type = data.get('template_type')
+        template_id = data.get('template_id')
         
-        template_type = data['template_type']
+        if not template_type and not template_id:
+            return jsonify({'error': 'Either template_type or template_id is required'}), 400
+        
         variables = data.get('variables', {})
         
         # Get the template
-        template_response = get_email_template_by_type(template_type)
-        if template_response[1] != 200:
-            return template_response
-        
-        template_data = template_response[0].get_json()
+        if template_id:
+            # Get template by ID
+            template = EmailTemplate.query.get(template_id)
+            if not template:
+                return jsonify({'error': f'Template with ID {template_id} not found'}), 404
+            
+            template_data = {
+                'name': template.name,
+                'subject': template.subject,
+                'html_body': template.html_body,
+                'text_body': template.text_body
+            }
+        else:
+            # Get template by type, with organization awareness
+            organization_id = data.get('organization_id')
+            template, status_code, message = get_email_template_by_type_and_organization(template_type, organization_id)
+            
+            if status_code != 200:
+                return jsonify({'error': message}), status_code
+            
+            template_data = {
+                'name': template.name,
+                'subject': template.subject,
+                'html_body': template.html_body,
+                'text_body': template.text_body
+            }
         
         # Render both HTML and text versions
         rendered_html = render_email_template(template_data['html_body'], **variables)
