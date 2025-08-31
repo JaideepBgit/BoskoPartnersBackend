@@ -315,9 +315,12 @@ The Saurara Research Team
 
 def send_welcome_email(to_email, username, password, firstname=None, survey_code=None, email_template_id=None):
     """Send welcome email to new user using database template (tries SES API first, falls back to SMTP)"""
+    logger.info(f"[EMAIL] Starting send_welcome_email - to_email: {to_email}, username: {username}, firstname: {firstname}, survey_code: {survey_code}, email_template_id: {email_template_id}")
+    
     try:
         # Try to get specific email template by ID, or fallback to default welcome template
         if email_template_id:
+            logger.info(f"[EMAIL] Attempting to use specific email template ID: {email_template_id}")
             try:
                 template = EmailTemplate.query.get(email_template_id)
                 if template:
@@ -328,39 +331,48 @@ def send_welcome_email(to_email, username, password, firstname=None, survey_code
                         'text_body': template.text_body
                     }
                     use_template = True
-                    logger.info(f"Using specific email template ID {email_template_id}: {template.name}")
+                    logger.info(f"[EMAIL] Successfully loaded specific email template ID {email_template_id}: {template.name}")
                 else:
+                    logger.warning(f"[EMAIL] Specific template ID {email_template_id} not found, falling back to default")
                     # Fallback to default template if specified template not found
                     template_response = get_email_template_by_type('welcome')
                     use_template = template_response[1] == 200
                     if use_template:
                         template_data = template_response[0].get_json()
-                        logger.info("Specified template not found, using default welcome template")
+                        logger.info("[EMAIL] Specified template not found, using default welcome template")
                     else:
+                        logger.error("[EMAIL] Failed to load both specific and default templates")
                         use_template = False
             except Exception as e:
-                logger.error(f"Error fetching specific email template {email_template_id}: {str(e)}")
+                logger.error(f"[EMAIL] Error fetching specific email template {email_template_id}: {str(e)}")
                 # Fallback to default template
+                logger.info(f"[EMAIL] Attempting fallback to default welcome template")
                 template_response = get_email_template_by_type('welcome')
                 use_template = template_response[1] == 200
                 if use_template:
                     template_data = template_response[0].get_json()
-                    logger.info("Error with specific template, using default welcome template")
+                    logger.info("[EMAIL] Error with specific template, using default welcome template")
                 else:
+                    logger.error("[EMAIL] Failed to load fallback default template")
                     use_template = False
         else:
             # Use default welcome template
+            logger.info(f"[EMAIL] No specific template ID provided, using default welcome template")
             template_response = get_email_template_by_type('welcome')
             use_template = template_response[1] == 200
             if use_template:
                 template_data = template_response[0].get_json()
-                logger.info("Using default welcome template")
+                logger.info("[EMAIL] Successfully loaded default welcome template")
+            else:
+                logger.error("[EMAIL] Failed to load default welcome template")
         
         if use_template:
+            logger.info(f"[EMAIL] Processing template data: {template_data.get('name', 'Unknown')}")
             subject = template_data['subject']
             
             # Create personalized greeting
             greeting = f"Dear {firstname}" if firstname else f"Dear {username}"
+            logger.info(f"[EMAIL] Created greeting: {greeting}")
             
             # Template variables
             template_vars = {
@@ -370,17 +382,24 @@ def send_welcome_email(to_email, username, password, firstname=None, survey_code
                 'password': password,
                 'survey_code': survey_code if survey_code else 'Not assigned'
             }
+            logger.info(f"[EMAIL] Template variables prepared: {list(template_vars.keys())}")
             
             # Render template content
-            body_text = render_email_template(template_data['text_body'], **template_vars)
-            body_html = render_email_template(template_data['html_body'], **template_vars)
+            try:
+                body_text = render_email_template(template_data['text_body'], **template_vars)
+                body_html = render_email_template(template_data['html_body'], **template_vars)
+                logger.info(f"[EMAIL] Template rendering successful")
+            except Exception as render_error:
+                logger.error(f"[EMAIL] Template rendering failed: {str(render_error)}")
+                raise render_error
             
-            logger.info(f"Using email template: {template_data['name']}")
+            logger.info(f"[EMAIL] Using email template: {template_data['name']}")
         else:
             # Fallback to hardcoded content if template not found
-            logger.warning("Welcome email template not found, using fallback content")
+            logger.warning("[EMAIL] Welcome email template not found, using fallback content")
             subject = "Welcome to Saurara Platform"
             greeting = f"Dear {firstname}" if firstname else f"Dear {username}"
+            logger.info(f"[EMAIL] Using fallback greeting: {greeting}")
             
             body_text = f"""{greeting},
 
@@ -399,43 +418,56 @@ Best regards,
 The Saurara Research Team"""
 
             body_html = f"""<html><body><h1>Welcome to Saurara!</h1><p>{greeting},</p><p>🎉 Welcome to the Saurara Platform!</p><p><strong>Your Account Credentials:</strong><br>Username: {username}<br>Password: {password}<br>Survey Code: {survey_code if survey_code else 'Not assigned'}</p><p>Best regards,<br>The Saurara Research Team</p></body></html>"""
+            logger.info(f"[EMAIL] Fallback content prepared with subject: {subject}")
         
+        logger.info(f"[EMAIL] Attempting to get SES client")
         ses_client = get_ses_client()
         if not ses_client:
-            logger.warning("SES API client failed, trying SMTP method...")
+            logger.warning("[EMAIL] SES API client failed, trying SMTP method...")
             return send_welcome_email_smtp(to_email, username, password, firstname, survey_code)
+        else:
+            logger.info(f"[EMAIL] SES client obtained successfully")
         
         # Debug the password being used in email template
-        logger.info(f"Email template variables - Username: '{username}', Email: '{to_email}', Password: '{password}', Survey Code: '{survey_code}'")
+        logger.info(f"[EMAIL] Template variables - Username: '{username}', Email: '{to_email}', Password: '{password}', Survey Code: '{survey_code}'")
         
         # Get verified sender email from environment
         source_email = os.getenv('SES_VERIFIED_EMAIL', 'noreply@saurara.org')
+        logger.info(f"[EMAIL] Using source email: {source_email}")
         
         # Send email
-        response = ses_client.send_email(
-            Destination={
-                'ToAddresses': [to_email],
-            },
-            Message={
-                'Body': {
-                    'Html': {
-                        'Charset': 'UTF-8',
-                        'Data': body_html,
-                    },
-                    'Text': {
-                        'Charset': 'UTF-8',
-                        'Data': body_text,
-                    },
-                },
-                'Subject': {
-                    'Charset': 'UTF-8',
-                    'Data': subject,
-                },
-            },
-            Source=source_email,  # Must be verified in SES
-        )
+        logger.info(f"[EMAIL] Preparing to send email via SES API")
+        logger.info(f"[EMAIL] Email details - To: {to_email}, Subject: {subject}, Source: {source_email}")
         
-        logger.info(f"Welcome email sent successfully via SES API to {to_email}. Message ID: {response['MessageId']}")
+        try:
+            response = ses_client.send_email(
+                Destination={
+                    'ToAddresses': [to_email],
+                },
+                Message={
+                    'Body': {
+                        'Html': {
+                            'Charset': 'UTF-8',
+                            'Data': body_html,
+                        },
+                        'Text': {
+                            'Charset': 'UTF-8',
+                            'Data': body_text,
+                        },
+                    },
+                    'Subject': {
+                        'Charset': 'UTF-8',
+                        'Data': subject,
+                    },
+                },
+                Source=source_email,  # Must be verified in SES
+            )
+            logger.info(f"[EMAIL] SES API call successful")
+        except Exception as ses_error:
+            logger.error(f"[EMAIL] SES API call failed: {str(ses_error)}")
+            raise ses_error
+        
+        logger.info(f"[EMAIL] Welcome email sent successfully via SES API to {to_email}. Message ID: {response['MessageId']}")
         return {
             'success': True,
             'method': 'SES_API',
@@ -446,12 +478,12 @@ The Saurara Research Team"""
     except ClientError as e:
         error_code = e.response['Error']['Code']
         error_message = e.response['Error']['Message']
-        logger.error(f"SES API ClientError: {error_code} - {error_message}")
-        logger.warning("SES API failed, trying SMTP method as fallback...")
+        logger.error(f"[EMAIL] SES API ClientError: {error_code} - {error_message}")
+        logger.warning("[EMAIL] SES API failed, trying SMTP method as fallback...")
         return send_welcome_email_smtp(to_email, username, password, firstname, survey_code)
     except Exception as e:
-        logger.error(f"Error sending welcome email via SES API: {str(e)}")
-        logger.warning("SES API failed, trying SMTP method as fallback...")
+        logger.error(f"[EMAIL] Error sending welcome email via SES API: {str(e)}")
+        logger.warning("[EMAIL] SES API failed, trying SMTP method as fallback...")
         return send_welcome_email_smtp(to_email, username, password, firstname, survey_code)
 
 def send_survey_assignment_email(to_email, username, password, survey_code, firstname=None, organization_name=None, survey_name=None, assigned_by=None):
@@ -1118,13 +1150,13 @@ The Saurara Research Team"""
     except ClientError as e:
         error_code = e.response['Error']['Code']
         error_message = e.response['Error']['Message']
-        logger.error(f"SES API ClientError: {error_code} - {error_message}")
-        logger.warning("SES API failed, trying SMTP method as fallback...")
-        return send_reminder_email_smtp(to_email, username, survey_code, firstname, organization_name, days_remaining)
+        logger.error(f"[EMAIL] SES API ClientError: {error_code} - {error_message}")
+        logger.warning("[EMAIL] SES API failed, trying SMTP method as fallback...")
+        return send_welcome_email_smtp(to_email, username, password, firstname, survey_code)
     except Exception as e:
-        logger.error(f"Error sending reminder email via SES API: {str(e)}")
-        logger.warning("SES API failed, trying SMTP method as fallback...")
-        return send_reminder_email_smtp(to_email, username, survey_code, firstname, organization_name, days_remaining)
+        logger.error(f"[EMAIL] Error sending welcome email via SES API: {str(e)}")
+        logger.warning("[EMAIL] SES API failed, trying SMTP method as fallback...")
+        return send_welcome_email_smtp(to_email, username, password, firstname, survey_code)
 
 # Initialize Flask app and SQLAlchemy
 app = Flask(__name__)
@@ -4839,6 +4871,10 @@ def initialize_default_email_templates():
             organization_id=first_org.id, 
             name='Default Reminder Email'
         ).first()
+        existing_invitation = EmailTemplate.query.filter_by(
+            organization_id=first_org.id, 
+            name='Default Invitation Email'
+        ).first()
         
         templates_created = []
         
@@ -5113,6 +5149,149 @@ Visit: www.saurara.org | Email: support@saurara.org"""
             )
             db.session.add(reminder_template)
             templates_created.append('Default Reminder Email')
+        
+        # Create Invitation Email Template
+        if not existing_invitation:
+            invitation_html = """
+            <html>
+            <head>
+                <style>
+                    body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; line-height: 1.6; color: #333; margin: 0; padding: 0; }
+                    .container { max-width: 650px; margin: 0 auto; padding: 20px; background: #f8fafc; }
+                    .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 40px 30px; text-align: center; border-radius: 15px 15px 0 0; box-shadow: 0 4px 20px rgba(102, 126, 234, 0.3); }
+                    .content { background: #ffffff; padding: 40px 30px; border: 1px solid #e2e8f0; box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1); }
+                    .footer { background: #f8fafc; padding: 30px; border-radius: 0 0 15px 15px; border: 1px solid #e2e8f0; border-top: none; text-align: center; }
+                    .credentials { background: #e8f5e8; padding: 25px; border-radius: 10px; margin: 25px 0; border-left: 5px solid #10b981; }
+                    .steps { background: #fff3cd; padding: 25px; border-radius: 10px; margin: 25px 0; border-left: 5px solid #fbbf24; }
+                    .highlight { color: #667eea; font-weight: bold; }
+                    .emoji { font-size: 1.2em; }
+                    .button { display: inline-block; background: #667eea; color: white; padding: 15px 30px; text-decoration: none; border-radius: 8px; font-weight: bold; margin: 15px 0; transition: background 0.3s ease; }
+                    .button:hover { background: #5a67d8; }
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="header">
+                        <h1 style="margin: 0; font-size: 32px;">📋 Survey Invitation</h1>
+                        <p style="margin: 15px 0 0 0; font-size: 18px; opacity: 0.9;">Your Participation Matters</p>
+                    </div>
+                    
+                    <div class="content">
+                        <p style="font-size: 18px; margin-bottom: 25px;">{{greeting}},</p>
+                        
+                        <p style="font-size: 16px; margin-bottom: 20px;">We're excited to invite you to participate in an important research survey{{org_text}} on the Saurara Platform!</p>
+                        
+                        <p style="margin-bottom: 20px;">Your participation will contribute to valuable research that helps improve educational and community programs. We've created a temporary account for you to access the survey.</p>
+                        
+                        <div class="credentials">
+                            <h3 style="margin-top: 0; color: #059669;"><span class="emoji">🔐</span> Your Temporary Account Credentials:</h3>
+                            <ul style="list-style: none; padding: 0;">
+                                <li style="margin: 8px 0;"><strong>Username:</strong> {{username}}</li>
+                                <li style="margin: 8px 0;"><strong>Temporary Password:</strong> <span class="highlight">{{password}}</span></li>
+                                <li style="margin: 8px 0;"><strong>Survey Access:</strong> <a href="http://www.saurara.org" style="color: #667eea;">www.saurara.org</a></li>
+                            </ul>
+                        </div>
+                        
+                        <div class="steps">
+                            <h3 style="margin-top: 0; color: #f59e0b;"><span class="emoji">📋</span> What You Need to Do:</h3>
+                            <ol style="padding-left: 20px;">
+                                <li style="margin: 8px 0;">Visit <a href="http://www.saurara.org" style="color: #667eea;">www.saurara.org</a></li>
+                                <li style="margin: 8px 0;">Click "Login" or "Survey Access"</li>
+                                <li style="margin: 8px 0;">Enter your username and temporary password</li>
+                                <li style="margin: 8px 0;">Complete the survey (takes about 15-20 minutes)</li>
+                                <li style="margin: 8px 0;">Change your password during first login for security</li>
+                            </ol>
+                        </div>
+                        
+                        <div style="background: #e0f2fe; padding: 25px; border-radius: 10px; margin: 25px 0; border-left: 5px solid #0ea5e9;">
+                            <h3 style="margin-top: 0; color: #0284c7;"><span class="emoji">🎯</span> Why Your Response Matters:</h3>
+                            <p style="margin-bottom: 0;">Your insights will help researchers understand and improve programs that benefit communities like yours. Every response makes a difference!</p>
+                        </div>
+                        
+                        <div style="background: #f0f9ff; padding: 20px; border-radius: 8px; margin: 20px 0;">
+                            <h3 style="margin-top: 0; color: #0369a1;"><span class="emoji">💡</span> Survey Features:</h3>
+                            <ul style="list-style: none; padding: 0;">
+                                <li style="margin: 8px 0;">• Save progress and return later</li>
+                                <li style="margin: 8px 0;">• Mobile-friendly interface</li>
+                                <li style="margin: 8px 0;">• Secure data handling</li>
+                                <li style="margin: 8px 0;">• Professional insights dashboard</li>
+                            </ul>
+                        </div>
+                        
+                        <p style="background: #fef3c7; padding: 20px; border-radius: 8px; border-left: 4px solid #f59e0b; margin: 25px 0;">
+                            <strong><span class="emoji">🆘</span> Need Help?</strong><br>
+                            Our support team is here to assist you. Contact us at <a href="mailto:support@saurara.org" style="color: #667eea;">support@saurara.org</a> if you have any questions.
+                        </p>
+                        
+                        <p style="margin: 25px 0;">We look forward to your valuable contribution!</p>
+                        
+                        <p style="font-size: 18px; font-weight: bold; color: #667eea; text-align: center; margin: 30px 0;">Thank you for participating! 🌟</p>
+                    </div>
+                    
+                    <div class="footer">
+                        <p style="margin: 0; color: #64748b;">Best regards,<br><strong>The Saurara Research Team</strong></p>
+                        <div style="margin-top: 20px; padding-top: 20px; border-top: 1px solid #e2e8f0;">
+                            <p style="margin: 0; font-size: 14px; color: #64748b;">
+                                🌐 <a href="http://www.saurara.org" style="color: #667eea;">www.saurara.org</a> | 
+                                📧 <a href="mailto:support@saurara.org" style="color: #667eea;">support@saurara.org</a> | 
+                                📱 Stay Connected
+                            </p>
+                        </div>
+                    </div>
+                </div>
+            </body>
+            </html>
+            """
+            
+            invitation_text = """{{greeting}},
+
+We're excited to invite you to participate in an important research survey{{org_text}} on the Saurara Platform!
+
+Your participation will contribute to valuable research that helps improve educational and community programs. We've created a temporary account for you to access the survey.
+
+🔐 Your Temporary Account Credentials:
+• Username: {{username}}
+• Temporary Password: {{password}}
+• Survey Access: www.saurara.org
+
+📋 What You Need to Do:
+1. Visit www.saurara.org
+2. Click "Login" or "Survey Access"
+3. Enter your username and temporary password
+4. Complete the survey (takes about 15-20 minutes)
+5. Change your password during first login for security
+
+🎯 Why Your Response Matters:
+Your insights will help researchers understand and improve programs that benefit communities like yours. Every response makes a difference!
+
+💡 Survey Features:
+• Save progress and return later
+• Mobile-friendly interface
+• Secure data handling
+• Professional insights dashboard
+
+🆘 Need Help?
+Our support team is here to assist you. Contact us at support@saurara.org if you have any questions.
+
+We look forward to your valuable contribution!
+
+Best regards,
+The Saurara Research Team
+
+---
+🌐 Platform: www.saurara.org
+📧 Support: support@saurara.org"""
+
+            invitation_template = EmailTemplate(
+                organization_id=first_org.id,
+                name='Default Invitation Email',
+                subject='📋 You\'re Invited: Complete the Saurara Survey',
+                html_body=invitation_html,
+                text_body=invitation_text,
+                is_public=True
+            )
+            db.session.add(invitation_template)
+            templates_created.append('Default Invitation Email')
         
         db.session.commit()
         
