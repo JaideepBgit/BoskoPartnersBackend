@@ -6689,6 +6689,8 @@ def get_email_templates():
         organization_id = request.args.get('organization_id')
         filter_organization_id = request.args.get('filter_organization_id')
         
+        logger.info(f"[EMAIL_TEMPLATES] Fetching templates - organization_id: {organization_id}, filter_organization_id: {filter_organization_id}")
+        
         # Start with base query, include organization relationship for organization name
         query = EmailTemplate.query.options(joinedload(EmailTemplate.organization))
         
@@ -6704,10 +6706,118 @@ def get_email_templates():
         # If no filters specified, show all templates (for admin inventory view)
         
         templates = query.order_by(EmailTemplate.created_at.desc()).all()
-        return jsonify({'success': True, 'templates': [t.to_dict() for t in templates]}), 200
+        logger.info(f"[EMAIL_TEMPLATES] Found {len(templates)} templates")
+        
+        template_dicts = []
+        for template in templates:
+            try:
+                template_dict = template.to_dict()
+                template_dicts.append(template_dict)
+            except Exception as template_error:
+                logger.error(f"[EMAIL_TEMPLATES] Error converting template {template.id} to dict: {str(template_error)}")
+                continue
+        
+        logger.info(f"[EMAIL_TEMPLATES] Successfully converted {len(template_dicts)} templates to dict")
+        return jsonify({'success': True, 'templates': template_dicts}), 200
+        
     except Exception as e:
-        logger.error(f"Error fetching email templates: {str(e)}")
+        logger.error(f"[EMAIL_TEMPLATES] Error fetching email templates: {str(e)}")
+        logger.error(f"[EMAIL_TEMPLATES] Exception type: {type(e).__name__}")
+        import traceback
+        logger.error(f"[EMAIL_TEMPLATES] Traceback: {traceback.format_exc()}")
         return jsonify({'error': f'Failed to fetch templates: {str(e)}'}), 500
+
+@app.route('/api/email-templates/all', methods=['GET'])
+def get_all_email_templates():
+    """Dedicated endpoint to fetch all email templates with enhanced debugging"""
+    try:
+        logger.info("[EMAIL_TEMPLATES_ALL] Starting to fetch all email templates")
+        
+        # Check database connection
+        try:
+            from sqlalchemy import text
+            db.session.execute(text('SELECT 1'))
+            logger.info("[EMAIL_TEMPLATES_ALL] Database connection verified")
+        except Exception as db_error:
+            logger.error(f"[EMAIL_TEMPLATES_ALL] Database connection error: {str(db_error)}")
+            return jsonify({'error': 'Database connection failed', 'details': str(db_error)}), 500
+        
+        # Check if EmailTemplate table exists and has data
+        try:
+            template_count = EmailTemplate.query.count()
+            logger.info(f"[EMAIL_TEMPLATES_ALL] Total templates in database: {template_count}")
+        except Exception as count_error:
+            logger.error(f"[EMAIL_TEMPLATES_ALL] Error counting templates: {str(count_error)}")
+            return jsonify({'error': 'Failed to access email templates table', 'details': str(count_error)}), 500
+        
+        if template_count == 0:
+            logger.info("[EMAIL_TEMPLATES_ALL] No templates found in database")
+            return jsonify({
+                'success': True, 
+                'templates': [], 
+                'message': 'No email templates found in database',
+                'count': 0
+            }), 200
+        
+        # Fetch templates with organization data
+        try:
+            query = EmailTemplate.query.options(joinedload(EmailTemplate.organization))
+            templates = query.order_by(EmailTemplate.created_at.desc()).all()
+            logger.info(f"[EMAIL_TEMPLATES_ALL] Successfully fetched {len(templates)} templates from database")
+        except Exception as fetch_error:
+            logger.error(f"[EMAIL_TEMPLATES_ALL] Error fetching templates: {str(fetch_error)}")
+            return jsonify({'error': 'Failed to fetch templates from database', 'details': str(fetch_error)}), 500
+        
+        # Convert templates to dictionaries
+        template_dicts = []
+        conversion_errors = []
+        
+        for i, template in enumerate(templates):
+            try:
+                template_dict = {
+                    'id': template.id,
+                    'organization_id': template.organization_id,
+                    'organization_name': template.organization.name if template.organization else f'Unknown (ID: {template.organization_id})',
+                    'name': template.name or 'Unnamed Template',
+                    'subject': template.subject or '',
+                    'html_body': template.html_body or '',
+                    'text_body': template.text_body or '',
+                    'is_public': bool(template.is_public),
+                    'created_at': template.created_at.isoformat() if template.created_at else None,
+                    'updated_at': template.updated_at.isoformat() if template.updated_at else None,
+                }
+                template_dicts.append(template_dict)
+                logger.debug(f"[EMAIL_TEMPLATES_ALL] Converted template {i+1}/{len(templates)}: {template.name}")
+                
+            except Exception as template_error:
+                error_msg = f"Template ID {template.id}: {str(template_error)}"
+                conversion_errors.append(error_msg)
+                logger.error(f"[EMAIL_TEMPLATES_ALL] Error converting template {template.id} to dict: {str(template_error)}")
+                continue
+        
+        logger.info(f"[EMAIL_TEMPLATES_ALL] Successfully converted {len(template_dicts)} templates, {len(conversion_errors)} errors")
+        
+        response_data = {
+            'success': True,
+            'templates': template_dicts,
+            'count': len(template_dicts),
+            'total_in_db': template_count,
+            'conversion_errors': conversion_errors if conversion_errors else None
+        }
+        
+        return jsonify(response_data), 200
+        
+    except Exception as e:
+        logger.error(f"[EMAIL_TEMPLATES_ALL] Unexpected error: {str(e)}")
+        logger.error(f"[EMAIL_TEMPLATES_ALL] Exception type: {type(e).__name__}")
+        import traceback
+        logger.error(f"[EMAIL_TEMPLATES_ALL] Traceback: {traceback.format_exc()}")
+        
+        return jsonify({
+            'error': 'Unexpected error occurred while fetching email templates',
+            'details': str(e),
+            'type': type(e).__name__
+        }), 500
 
 
 @app.route('/api/email-templates', methods=['POST'])
@@ -7130,6 +7240,92 @@ def get_user_survey_assignments(user_id):
     except Exception as e:
         logger.error(f"Error getting user survey assignments: {str(e)}")
         return jsonify({'error': f'Failed to get user survey assignments: {str(e)}'}), 500
+
+@app.route('/api/email-templates/debug', methods=['GET'])
+def debug_email_templates():
+    """Debug endpoint to check email templates table and data integrity"""
+    try:
+        debug_info = {
+            'timestamp': datetime.utcnow().isoformat(),
+            'database_connection': False,
+            'table_exists': False,
+            'template_count': 0,
+            'organization_count': 0,
+            'sample_templates': [],
+            'errors': []
+        }
+        
+        # Test database connection
+        try:
+            from sqlalchemy import text
+            db.session.execute(text('SELECT 1'))
+            debug_info['database_connection'] = True
+            logger.info("[EMAIL_DEBUG] Database connection successful")
+        except Exception as db_error:
+            debug_info['errors'].append(f"Database connection failed: {str(db_error)}")
+            logger.error(f"[EMAIL_DEBUG] Database connection failed: {str(db_error)}")
+            return jsonify(debug_info), 500
+        
+        # Check if email_templates table exists
+        try:
+            from sqlalchemy import text
+            result = db.session.execute(text("SHOW TABLES LIKE 'email_templates'"))
+            if result.fetchone():
+                debug_info['table_exists'] = True
+                logger.info("[EMAIL_DEBUG] email_templates table exists")
+            else:
+                debug_info['errors'].append("email_templates table does not exist")
+                logger.error("[EMAIL_DEBUG] email_templates table does not exist")
+                return jsonify(debug_info), 500
+        except Exception as table_error:
+            debug_info['errors'].append(f"Error checking table existence: {str(table_error)}")
+            logger.error(f"[EMAIL_DEBUG] Error checking table existence: {str(table_error)}")
+        
+        # Count templates
+        try:
+            template_count = EmailTemplate.query.count()
+            debug_info['template_count'] = template_count
+            logger.info(f"[EMAIL_DEBUG] Found {template_count} email templates")
+        except Exception as count_error:
+            debug_info['errors'].append(f"Error counting templates: {str(count_error)}")
+            logger.error(f"[EMAIL_DEBUG] Error counting templates: {str(count_error)}")
+        
+        # Count organizations
+        try:
+            org_count = Organization.query.count()
+            debug_info['organization_count'] = org_count
+            logger.info(f"[EMAIL_DEBUG] Found {org_count} organizations")
+        except Exception as org_error:
+            debug_info['errors'].append(f"Error counting organizations: {str(org_error)}")
+            logger.error(f"[EMAIL_DEBUG] Error counting organizations: {str(org_error)}")
+        
+        # Get sample templates (first 3)
+        try:
+            sample_templates = EmailTemplate.query.limit(3).all()
+            for template in sample_templates:
+                debug_info['sample_templates'].append({
+                    'id': template.id,
+                    'name': template.name,
+                    'organization_id': template.organization_id,
+                    'is_public': template.is_public,
+                    'has_html_body': bool(template.html_body and template.html_body.strip()),
+                    'has_text_body': bool(template.text_body and template.text_body.strip()),
+                    'created_at': template.created_at.isoformat() if template.created_at else None
+                })
+            logger.info(f"[EMAIL_DEBUG] Retrieved {len(sample_templates)} sample templates")
+        except Exception as sample_error:
+            debug_info['errors'].append(f"Error getting sample templates: {str(sample_error)}")
+            logger.error(f"[EMAIL_DEBUG] Error getting sample templates: {str(sample_error)}")
+        
+        return jsonify(debug_info), 200
+        
+    except Exception as e:
+        logger.error(f"[EMAIL_DEBUG] Unexpected error in debug endpoint: {str(e)}")
+        return jsonify({
+            'error': 'Debug endpoint failed',
+            'details': str(e),
+            'timestamp': datetime.utcnow().isoformat()
+        }), 500
 
 @app.route('/api/test/email-templates-integration', methods=['GET'])
 def test_email_templates_integration():
