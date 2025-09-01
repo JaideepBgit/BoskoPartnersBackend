@@ -6532,6 +6532,13 @@ def get_email_template_by_type_and_organization(template_type, organization_id=N
                 is_public=True
             ).first()
         
+        # Look for templates with NULL organization_id (global templates)
+        if not template:
+            template = EmailTemplate.query.filter(
+                EmailTemplate.name == template_name,
+                EmailTemplate.organization_id.is_(None)
+            ).first()
+        
         # Final fallback to any template with this name
         if not template:
             template = EmailTemplate.query.filter_by(name=template_name).first()
