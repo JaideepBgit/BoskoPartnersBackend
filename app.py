@@ -2169,18 +2169,75 @@ def add_template_version():
 
 @app.route('/api/template-versions/<int:version_id>', methods=['DELETE'])
 def delete_template_version(version_id):
-    """Delete a template version"""
+    """Delete a template version and all its associated templates"""
     try:
         version = SurveyTemplateVersion.query.get_or_404(version_id)
         
-        # Simply delete the template version
+        # First, find all templates that reference this version
+        templates = SurveyTemplate.query.filter_by(version_id=version_id).all()
+        template_ids = [t.id for t in templates]
+        
+        deleted_counts = {
+            'templates': 0,
+            'responses': 0,
+            'conditional_logic': 0
+        }
+        
+        if template_ids:
+            logger.info(f"Found {len(template_ids)} templates to delete for version {version_id}")
+            
+            # Delete associated records in proper order to avoid foreign key constraints
+            
+            # 1. Delete conditional_logic records that reference these templates
+            try:
+                if len(template_ids) == 1:
+                    conditional_logic_result = db.session.execute(
+                        text("DELETE FROM conditional_logic WHERE template_id = :template_id"),
+                        {"template_id": template_ids[0]}
+                    )
+                else:
+                    conditional_logic_result = db.session.execute(
+                        text("DELETE FROM conditional_logic WHERE template_id IN :template_ids"),
+                        {"template_ids": tuple(template_ids)}
+                    )
+                deleted_counts['conditional_logic'] = conditional_logic_result.rowcount
+                logger.info(f"Deleted {deleted_counts['conditional_logic']} conditional_logic records")
+            except Exception as e:
+                logger.warning(f"Error deleting conditional_logic records: {str(e)}")
+            
+            # 2. Delete survey_responses that reference these templates
+            try:
+                if len(template_ids) == 1:
+                    responses_result = db.session.execute(
+                        text("DELETE FROM survey_responses WHERE template_id = :template_id"),
+                        {"template_id": template_ids[0]}
+                    )
+                else:
+                    responses_result = db.session.execute(
+                        text("DELETE FROM survey_responses WHERE template_id IN :template_ids"),
+                        {"template_ids": tuple(template_ids)}
+                    )
+                deleted_counts['responses'] = responses_result.rowcount
+                logger.info(f"Deleted {deleted_counts['responses']} survey_responses records")
+            except Exception as e:
+                logger.warning(f"Error deleting survey_responses records: {str(e)}")
+            
+            # 3. Delete the survey templates
+            for template in templates:
+                db.session.delete(template)
+                deleted_counts['templates'] += 1
+            
+            logger.info(f"Deleted {deleted_counts['templates']} survey templates")
+        
+        # 4. Finally, delete the template version
         db.session.delete(version)
         db.session.commit()
         
-        logger.info(f"Successfully deleted template version {version_id}")
+        logger.info(f"Successfully deleted template version {version_id} and all associated records")
         return jsonify({
             'deleted': True, 
-            'version_id': version_id
+            'version_id': version_id,
+            'deleted_counts': deleted_counts
         }), 200
         
     except Exception as e:
