@@ -4565,17 +4565,90 @@ def upload_users():
     file_path = os.path.join('/tmp', filename)
     file.save(file_path)
     
-    # Process the file (placeholder - actual implementation would depend on file format)
+    # Process the file and create users
+    created_users = []
+    errors = []
+    
     try:
-        # This is a placeholder for the actual file processing logic
-        # In a real implementation, you would parse the CSV/XLSX and create users
+        import pandas as pd
+        import string
+        import random
+        
+        # Read the file
+        if filename.endswith('.csv'):
+            df = pd.read_csv(file_path)
+        else:
+            df = pd.read_excel(file_path)
+        
+        # Process each row
+        for index, row in df.iterrows():
+            try:
+                # Generate password for each user
+                user_password = ''.join(random.choices(string.ascii_letters + string.digits, k=10))
+                
+                # Generate survey code
+                survey_code = str(uuid.uuid4())
+                
+                # Validate required fields
+                if pd.isna(row.get('username')) or pd.isna(row.get('email')):
+                    errors.append(f"Row {index + 1}: Missing username or email")
+                    continue
+                
+                # Create the user
+                new_user = User(
+                    username=str(row['username']).strip(),
+                    email=str(row['email']).strip(),
+                    password=user_password,
+                    role=str(row.get('role', 'user')).strip(),
+                    firstname=str(row.get('firstname', '')).strip() if not pd.isna(row.get('firstname')) else None,
+                    lastname=str(row.get('lastname', '')).strip() if not pd.isna(row.get('lastname')) else None,
+                    organization_id=int(row['organization_id']) if not pd.isna(row.get('organization_id')) else None,
+                    survey_code=survey_code,
+                    phone=str(row.get('phone', '')).strip() if not pd.isna(row.get('phone')) else None
+                )
+                
+                db.session.add(new_user)
+                db.session.flush()  # Get the user ID
+                
+                # Send welcome email
+                try:
+                    email_result = send_welcome_email(
+                        to_email=new_user.email,
+                        username=new_user.username,
+                        password=user_password,
+                        firstname=new_user.firstname,
+                        survey_code=survey_code
+                    )
+                    logger.info(f"Welcome email sent for uploaded user {new_user.username}: {email_result}")
+                except Exception as email_error:
+                    logger.error(f"Failed to send welcome email for user {new_user.username}: {str(email_error)}")
+                
+                created_users.append({
+                    'id': new_user.id,
+                    'username': new_user.username,
+                    'email': new_user.email,
+                    'password': user_password  # Include password in response for debugging
+                })
+                
+            except Exception as user_error:
+                errors.append(f"Row {index + 1}: {str(user_error)}")
+                continue
+        
+        # Commit all changes
+        db.session.commit()
+        
         return jsonify({
-            'message': 'File uploaded successfully',
-            'filename': filename,
-            'status': 'pending_processing'
+            'message': f'Successfully created {len(created_users)} users',
+            'created_users': created_users,
+            'errors': errors,
+            'total_processed': len(df),
+            'successful': len(created_users),
+            'failed': len(errors)
         })
+        
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        db.session.rollback()
+        return jsonify({'error': f'File processing failed: {str(e)}'}), 500
     finally:
         # Clean up the temporary file
         if os.path.exists(file_path):
