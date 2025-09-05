@@ -10,6 +10,7 @@ from datetime import datetime
 import logging
 import traceback
 import uuid
+import time
 from sqlalchemy import event
 from uuid import uuid4
 import os
@@ -2346,6 +2347,7 @@ def get_template(template_id):
     }), 200
 
 
+@app.route('/api/templates/<int:template_id>', methods=['PUT'])
 @app.route('/api/templates/<int:template_id>/', methods=['PUT'])
 def update_template(template_id):
     template = SurveyTemplate.query.get_or_404(template_id)
@@ -2364,10 +2366,21 @@ def update_template(template_id):
         logger.info(f"Updating questions for template {template_id}")
         logger.debug(f"New questions data: {data['questions']}")
         
-        # Validate that all questions have required fields
-        for question in data['questions']:
-            if not all(key in question for key in ['id', 'question_text', 'question_type_id', 'order']):
-                return jsonify({'error': 'Invalid question data: missing required fields'}), 400
+        # Validate that all questions have required fields - make validation more flexible
+        for i, question in enumerate(data['questions']):
+            # Check for essential fields but be more flexible about what's required
+            if not question.get('question_text'):
+                logger.error(f"Question {i} missing question_text: {question}")
+                return jsonify({'error': f'Question {i+1}: question_text is required'}), 400
+            if not question.get('question_type_id'):
+                logger.error(f"Question {i} missing question_type_id: {question}")
+                return jsonify({'error': f'Question {i+1}: question_type_id is required'}), 400
+            # Ensure order exists, default to index if missing
+            if 'order' not in question:
+                question['order'] = i
+            # Ensure id exists, generate one if missing
+            if 'id' not in question:
+                question['id'] = f"q_{i}_{int(time.time())}"
         
         template.questions = data['questions']
         updated = True
@@ -3997,15 +4010,16 @@ def get_template_sections(template_id):
     template = SurveyTemplate.query.get_or_404(template_id)
     
     # Get sections from template.sections or derive from questions
-    if template.sections:
+    if template.sections and isinstance(template.sections, dict) and len(template.sections) > 0:
         sections = template.sections
     else:
         # Derive sections from questions
         sections = {}
         for question in (template.questions or []):
             section_name = question.get('section', 'Uncategorized')
-            if section_name not in sections:
-                sections[section_name] = len(sections)
+            if section_name and section_name != 'Uncategorized':
+                if section_name not in sections:
+                    sections[section_name] = len(sections)
     
     # Convert to list format sorted by order
     sections_list = [{'name': name, 'order': order} for name, order in sections.items()]
