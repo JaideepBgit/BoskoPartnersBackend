@@ -2341,6 +2341,7 @@ def get_template(template_id):
         "version_name": template.version.name,
         "survey_code": template.survey_code,
         "questions": template.questions,
+        "sections": template.sections,
         "created_at": template.created_at
     }), 200
 
