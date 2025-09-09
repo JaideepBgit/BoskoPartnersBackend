@@ -4256,6 +4256,11 @@ def add_user():
     db.session.add(new_user)
     db.session.flush()  # Get the user ID
     
+    # Update geo_location with user_id and organization_id after user creation
+    if geo_location_id:
+        geo_location.user_id = new_user.id
+        geo_location.organization_id = data.get('organization_id')
+    
     # If role was changed to 'other', create organizational role
     if requested_role != validated_role and data.get('organization_id'):
         # Find or create the role in the Role table
@@ -7817,6 +7822,194 @@ def get_survey_questions():
         logger.error(f"Error fetching survey questions: {str(e)}")
         logger.error(traceback.format_exc())
         return jsonify({'error': f'Failed to fetch survey questions: {str(e)}'}), 500
+
+
+# User-specific survey response endpoints
+@app.route('/api/survey-responses/user/<int:user_id>', methods=['GET'])
+def get_user_survey_responses(user_id):
+    """Get all survey responses for a specific user"""
+    try:
+        logger.info(f"Fetching survey responses for user_id: {user_id}")
+        
+        # First, get user info for location data
+        user = db.session.query(User).filter_by(id=user_id).first()
+        if not user:
+            logger.warning(f"User not found: {user_id}")
+            return jsonify({'error': 'User not found'}), 404
+        
+        logger.info(f"Found user: {user.email}")
+        
+        # Get all survey responses directly from survey_responses table for this user
+        survey_responses = db.session.query(SurveyResponse)\
+            .filter(SurveyResponse.user_id == user_id)\
+            .all()
+        
+        logger.info(f"Found {len(survey_responses)} survey responses")
+        
+        responses = []
+        for survey_response in survey_responses:
+            # Get the template info directly
+            template = db.session.query(SurveyTemplate).filter_by(
+                id=survey_response.template_id
+            ).first()
+            
+            # Determine survey type from template survey_code since survey_type field doesn't exist
+            survey_type = 'general'
+            if template and template.survey_code:
+                code_lower = template.survey_code.lower()
+                if 'church' in code_lower:
+                    survey_type = 'church'
+                elif 'institution' in code_lower:
+                    survey_type = 'institution'
+                elif 'non-formal' in code_lower or 'nonformal' in code_lower:
+                    survey_type = 'nonFormal'
+                else:
+                    # Default classification based on template ID or other logic
+                    survey_type = 'church'  # Default to church for now
+            
+            # Get user location data from geo_locations table
+            geo_location = db.session.query(GeoLocation).filter_by(
+                user_id=user_id, which='user'
+            ).first()
+            
+            response_data = {
+                'id': survey_response.id,
+                'template_id': survey_response.template_id,
+                'template_name': template.survey_code if template else 'Unknown Survey',
+                'survey_type': survey_type,
+                'responses': survey_response.answers,  # Use 'answers' field from SurveyResponse model
+                'submitted_at': survey_response.updated_at.isoformat() if survey_response.updated_at else None,
+                'created_at': survey_response.created_at.isoformat() if survey_response.created_at else None,
+                'city': geo_location.city if geo_location else None,
+                'country': geo_location.country if geo_location else None,
+                'education_level': None,  # Not available in current schema
+                'age_group': None  # Not available in current schema
+            }
+            responses.append(response_data)
+            logger.info(f"Added response {survey_response.id} with type {survey_type}")
+        
+        logger.info(f"Returning {len(responses)} responses")
+        return jsonify({'responses': responses}), 200
+        
+    except Exception as e:
+        logger.error(f"Error fetching user survey responses: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': f'Failed to fetch user survey responses: {str(e)}'}), 500
+
+
+@app.route('/api/survey-responses/similar', methods=['POST'])
+def get_similar_survey_comparison():
+    """Get comparison data for similar surveys"""
+    try:
+        data = request.get_json()
+        user_id = data.get('user_id')
+        response_id = data.get('response_id')
+        survey_type = data.get('survey_type')
+        selected_surveys = data.get('selected_surveys', [])
+        
+        # Get the target response
+        target_response = db.session.query(SurveyResponse).filter_by(id=response_id).first()
+        if not target_response:
+            return jsonify({'error': 'Target response not found'}), 404
+        
+        # Get the target template directly
+        target_template = db.session.query(SurveyTemplate).filter_by(
+            id=target_response.template_id
+        ).first()
+        
+        # Find similar surveys based on survey type
+        query = db.session.query(SurveyResponse).join(SurveyTemplate)
+        
+        # Filter by survey type using survey_code since survey_type field doesn't exist
+        if survey_type == 'church':
+            query = query.filter(SurveyTemplate.survey_code.like('%church%'))
+        elif survey_type == 'institution':
+            query = query.filter(SurveyTemplate.survey_code.like('%institution%'))
+        elif survey_type == 'nonFormal':
+            query = query.filter(or_(
+                SurveyTemplate.survey_code.like('%non-formal%'),
+                SurveyTemplate.survey_code.like('%nonformal%')
+            ))
+        
+        # If specific surveys are selected, filter by those
+        if selected_surveys:
+            query = query.filter(SurveyResponse.id.in_(selected_surveys))
+        
+        similar_responses = query.all()
+        
+        # Calculate comparison statistics
+        target_scores = {}
+        all_scores = {}
+        
+        if target_response.answers:
+            # Extract scores from target response
+            for question_id, answer in target_response.answers.items():
+                if isinstance(answer, (int, float)) and 1 <= answer <= 5:
+                    target_scores[question_id] = answer
+        
+        # Extract scores from similar responses
+        for response in similar_responses:
+            if response.answers:
+                for question_id, answer in response.answers.items():
+                    if isinstance(answer, (int, float)) and 1 <= answer <= 5:
+                        if question_id not in all_scores:
+                            all_scores[question_id] = []
+                        all_scores[question_id].append(answer)
+        
+        # Calculate averages
+        averages = {}
+        for question_id, scores in all_scores.items():
+            if scores:
+                averages[question_id] = sum(scores) / len(scores)
+        
+        # Calculate comparison stats
+        stats = {
+            'total_comparisons': len(similar_responses),
+            'questions_compared': len(target_scores),
+            'average_difference': 0,
+            'higher_than_average': 0,
+            'lower_than_average': 0
+        }
+        
+        if target_scores and averages:
+            differences = []
+            for question_id in target_scores:
+                if question_id in averages:
+                    diff = target_scores[question_id] - averages[question_id]
+                    differences.append(diff)
+                    if diff > 0:
+                        stats['higher_than_average'] += 1
+                    elif diff < 0:
+                        stats['lower_than_average'] += 1
+            
+            if differences:
+                stats['average_difference'] = sum(differences) / len(differences)
+        
+        # Get target user info from geo_locations table
+        target_user = db.session.query(User).filter_by(id=user_id).first()
+        target_geo = db.session.query(GeoLocation).filter_by(
+            user_id=user_id, which='user'
+        ).first()
+        
+        target_info = {
+            'id': target_response.id,
+            'city': target_geo.city if target_geo else None,
+            'country': target_geo.country if target_geo else None,
+            'template_name': target_template.survey_code if target_template else 'Unknown'
+        }
+        
+        return jsonify({
+            'target': target_info,
+            'targetScores': target_scores,
+            'averages': averages,
+            'stats': stats,
+            'comparison_count': len(similar_responses)
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error generating similar survey comparison: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': f'Failed to generate comparison: {str(e)}'}), 500
 
 
 if __name__ == '__main__':
