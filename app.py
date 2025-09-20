@@ -3560,6 +3560,63 @@ def get_organization_users(org_id):
     
     return jsonify(result)
 
+# Get user's associated organizations
+@app.route('/api/users/<int:user_id>/organizations', methods=['GET'])
+def get_user_organizations(user_id):
+    """Get organizations associated with a specific user"""
+    try:
+        # Get the user
+        user = User.query.get_or_404(user_id)
+        
+        # Get user's primary organization
+        organizations = []
+        if user.organization_id:
+            primary_org = Organization.query.get(user.organization_id)
+            if primary_org:
+                organizations.append({
+                    'id': primary_org.id,
+                    'name': primary_org.name,
+                    'organization_type': {
+                        'type': primary_org.organization_type.type if primary_org.organization_type else None
+                    },
+                    'geo_location': {
+                        'city': primary_org.geo_location.city if primary_org.geo_location else None,
+                        'country': primary_org.geo_location.country if primary_org.geo_location else None
+                    } if primary_org.geo_location else None,
+                    'is_primary': True
+                })
+        
+        # Get additional organizations through user_organization_roles
+        additional_orgs = db.session.query(Organization).join(
+            UserOrganizationRole, Organization.id == UserOrganizationRole.organization_id
+        ).filter(
+            UserOrganizationRole.user_id == user_id,
+            Organization.id != user.organization_id  # Exclude primary org to avoid duplicates
+        ).all()
+        
+        for org in additional_orgs:
+            organizations.append({
+                'id': org.id,
+                'name': org.name,
+                'organization_type': {
+                    'type': org.organization_type.type if org.organization_type else None
+                },
+                'geo_location': {
+                    'city': org.geo_location.city if org.geo_location else None,
+                    'country': org.geo_location.country if org.geo_location else None
+                } if org.geo_location else None,
+                'is_primary': False
+            })
+        
+        return jsonify({
+            'organizations': organizations,
+            'count': len(organizations)
+        })
+        
+    except Exception as e:
+        logger.error(f"Error fetching organizations for user {user_id}: {str(e)}")
+        return jsonify({'error': f'Failed to fetch user organizations: {str(e)}'}), 500
+
 # File upload endpoint for organizations
 @app.route('/api/organizations/upload', methods=['POST'])
 def upload_organizations():
@@ -7352,7 +7409,12 @@ def get_user_survey_assignments(user_id):
         for assignment in assignments:
             try:
                 template_name = "Survey"  # Default name
+                survey_code = None
+                
                 if assignment.template:
+                    # Get survey_code from SurveyTemplate table
+                    survey_code = assignment.template.survey_code
+                    
                     if assignment.template.version:
                         template_name = assignment.template.version.name
                     else:
@@ -7365,7 +7427,7 @@ def get_user_survey_assignments(user_id):
                     'id': assignment.id,
                     'template_id': assignment.template_id,
                     'template_name': template_name,
-                    'survey_code': assignment.survey_code,
+                    'survey_code': survey_code,  # Now from SurveyTemplate table
                     'status': assignment.status,
                     'created_at': assignment.created_at.isoformat() if assignment.created_at else None,
                     'start_date': assignment.start_date.isoformat() if assignment.start_date else None,
