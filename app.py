@@ -7394,15 +7394,22 @@ def assign_survey_to_user():
 def get_user_survey_assignments(user_id):
     """Get all survey assignments for a specific user"""
     try:
-        # Verify user exists
+        # Verify user exists and get organization information
         user = User.query.get_or_404(user_id)
+        
+        # Get organization name if user has an organization
+        organization_type = "Survey"  # Default
+        if user.organization_id:
+            organization = Organization.query.filter_by(id=user.organization_id).first()
+            if organization:
+                organization_type = organization.name
         
         # Get all survey responses for this user with eager loading of relationships
         assignments = db.session.query(SurveyResponse)\
             .options(db.joinedload(SurveyResponse.template)\
                       .joinedload(SurveyTemplate.version))\
             .filter_by(user_id=user_id).all()
-        
+        logger.info(f"orgniazation_type: {organization_type}")
         logger.info(f"Found {len(assignments)} assignments for user {user_id}")
         
         result = []
@@ -7424,10 +7431,11 @@ def get_user_survey_assignments(user_id):
                     logger.warning(f"Assignment {assignment.id} has no template")
                 
                 assignment_data = {
-                    'id': assignment.id,
+                    'id': assignment.lid,
                     'template_id': assignment.template_id,
                     'template_name': template_name,
                     'survey_code': survey_code,  # Now from SurveyTemplate table
+                    'organization_type': organization_type,  # Add organization type
                     'status': assignment.status,
                     'created_at': assignment.created_at.isoformat() if assignment.created_at else None,
                     'start_date': assignment.start_date.isoformat() if assignment.start_date else None,
@@ -7444,11 +7452,12 @@ def get_user_survey_assignments(user_id):
             'user_id': user_id,
             'username': user.username,
             'email': user.email,
+            'organization_type': organization_type,  # Add to response data as well
             'total_assignments': len(result),
             'assignments': result
         }
         
-        logger.info(f"Returning {len(result)} assignments for user {user_id}")
+        logger.info(f"Returning {len(result)} assignments for user {user_id} with organization type: {organization_type}")
         return jsonify(response_data), 200
         
     except Exception as e:
