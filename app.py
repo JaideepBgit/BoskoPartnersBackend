@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, g
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
 from sqlalchemy.dialects.mysql import JSON
@@ -1208,7 +1208,7 @@ if env_user and env_password and env_host and env_name:
 if not db_url:
     # Local defaults
     local_db_user     = 'root'
-    local_db_password = 'jaideep'
+    local_db_password = 'rootroot'
     local_db_host     = 'localhost'
     local_db_port     = '3306'
     local_db_name     = 'boskopartnersdb'
@@ -7236,6 +7236,228 @@ def get_analytics_overview():
     except Exception as e:
         logger.error(f"Error fetching analytics overview: {str(e)}")
         return jsonify({'error': f'Failed to fetch analytics overview: {str(e)}'}), 500
+
+# ---------- Textual Analytics (Qualitative) ----------
+
+def create_sample_dataframe_for_analytics(survey_type, response_id, selected_surveys):
+    """Create a pandas DataFrame from sample data that mimics the database structure for text analytics."""
+    import json
+    import os
+    import pandas as pd
+    
+    # Define the sample data directory path
+    sample_data_dir = os.path.join(os.path.dirname(__file__), '..', 'BoskoPartnersFrontend', 'public', 'sample-data')
+    
+    # Define text fields to analyze by survey type
+    text_fields_map = {
+        'church': [
+            'other_training_areas',
+            'why_choose_institution', 
+            'expectations_met_explanation',
+            'better_preparation_areas',
+            'different_preparation_explanation',
+            'ongoing_support_description',
+            'better_ongoing_support'
+        ],
+        'institution': [
+            'other_training_areas',
+            'why_choose_institution',
+            'expectations_met_explanation', 
+            'better_preparation_areas',
+            'different_preparation_explanation',
+            'ongoing_support_description',
+            'better_ongoing_support'
+        ],
+        'non_formal': [
+            'why_choose_non_formal',
+            'better_preparation_areas',
+            'different_preparation_explanation',
+            'ongoing_support_description',
+            'better_ongoing_support'
+        ]
+    }
+    
+    # Map survey types to file names
+    file_map = {
+        'church': 'church-survey-responses.json',
+        'institution': 'institution-survey-responses.json', 
+        'non_formal': 'non-formal-survey-responses.json'
+    }
+    
+    # Determine which files to load
+    files_to_load = []
+    if survey_type and survey_type in file_map:
+        files_to_load = [survey_type]
+    else:
+        files_to_load = ['church', 'institution', 'non_formal']
+    
+    rows = []
+    question_id_counter = 1
+    
+    for survey_key in files_to_load:
+        file_path = os.path.join(sample_data_dir, file_map[survey_key])
+        
+        if os.path.exists(file_path):
+            with open(file_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                
+            text_fields = text_fields_map.get(survey_key, [])
+            
+            for response in data.get('responses', []):
+                response_id_val = response.get('id', 0)
+                
+                # Extract text responses from this survey response
+                for field in text_fields:
+                    text_value = response.get(field, '').strip()
+                    if text_value and len(text_value) > 5:  # Only include meaningful text
+                        rows.append({
+                            "response_id": response_id_val,
+                            "question_id": question_id_counter,
+                            "question_type": "paragraph" if len(text_value) > 100 else "short_text",
+                            "answer": text_value
+                        })
+                        question_id_counter += 1
+    
+    df = pd.DataFrame(rows)
+    
+    # Apply filters if needed
+    if selected_surveys:
+        try:
+            selected_ids = [int(id.strip()) for id in selected_surveys.split(',')]
+            df = df[df['response_id'].isin(selected_ids)]
+        except (ValueError, AttributeError):
+            pass
+    
+    if response_id:
+        try:
+            target_id = int(response_id)
+            df = df[df['response_id'] == target_id]
+        except (ValueError, TypeError):
+            pass
+    
+    return df
+
+def get_sample_text_analytics(survey_type, response_id, selected_surveys):
+    """Return sample text analytics using proper NLP analysis from text_analytics.py module."""
+    try:
+        # Create a DataFrame from sample data that mimics the database structure
+        df = create_sample_dataframe_for_analytics(survey_type, response_id, selected_surveys)
+        
+        if df.empty:
+            return jsonify({'success': True, 'results': []}), 200
+        
+        # Import text analytics module
+        # Use the same NLP analysis as production route - handles all dataset sizes
+        try:
+            from text_analytics import run_full_analysis
+            
+            # Create a temporary DataFrame with the required structure for run_full_analysis
+            temp_df = df.copy()
+            
+            # Run full NLP analysis (handles small datasets properly)
+            analyzed_df = run_full_analysis(db.session, SurveyResponse, Question)
+            
+            # Filter to only the responses we have in our sample data
+            response_ids = df['response_id'].unique()
+            analyzed_df = analyzed_df[analyzed_df['response_id'].isin(response_ids)]
+            
+            # Merge the analysis results back to our original DataFrame
+            df = df.merge(
+                analyzed_df[['response_id', 'question_id', 'sentiment', 'topic', 'cluster']], 
+                on=['response_id', 'question_id'], 
+                how='left',
+                suffixes=('', '_analyzed')
+            )
+            
+            # Use analyzed values where available, keep original sentiment if already computed
+            df['sentiment'] = df['sentiment_analyzed'].fillna(df.get('sentiment', 'neutral'))
+            df['topic'] = df['topic'].fillna(0).astype(int)
+            df['cluster'] = df['cluster'].fillna(0).astype(int)
+            
+            # Add meaningful labels (simplified for sample data)
+            df['topic_label'] = df['topic'].apply(lambda x: f"Topic {x}" if x != -1 else "Outlier Topic")
+            df['topic_description'] = df['topic'].apply(lambda x: f"Topic {x} responses" if x != -1 else "Outlier responses")
+            df['cluster_label'] = df['cluster'].apply(lambda x: f"Cluster {x}")
+            df['cluster_description'] = df['cluster'].apply(lambda x: f"Cluster {x} responses")
+            
+            # Clean up temporary columns
+            df = df.drop(columns=[col for col in df.columns if col.endswith('_analyzed')], errors='ignore')
+            
+        except Exception as nlp_error:
+            logger.warning(f"NLP analysis failed, falling back to simple analysis: {str(nlp_error)}")
+            # Fallback to simple analysis if NLP fails
+            from text_analytics import _clean_text, _sentiment_label
+            
+            df["clean_text"] = df["answer"].apply(_clean_text)
+            df["sentiment"] = df["clean_text"].apply(_sentiment_label)
+            df["topic"] = 0
+            df["topic_label"] = "General Ministry"
+            df["topic_description"] = "General ministry-related responses"
+            df["cluster"] = 0
+            df["cluster_label"] = "All Responses"
+            df["cluster_description"] = "All responses grouped together"
+        
+        # Convert to the format expected by the frontend
+        results = df.drop(columns=['clean_text'], errors='ignore').to_dict(orient='records')
+        
+        return jsonify({'success': True, 'results': results}), 200
+        
+    except Exception as e:
+        logger.error(f"Error running sample text analytics: {str(e)}")
+        return jsonify({'success': False, 'error': str(e), 'results': []}), 500
+
+@app.route('/api/reports/analytics/text', methods=['GET'])
+def get_textual_analytics():
+    """Return sentiment, topic and cluster labels for open-ended answers."""
+    try:
+        refresh = request.args.get('refresh', 'false').lower() == 'true'
+        survey_type = request.args.get('survey_type')
+        response_id = request.args.get('response_id')
+        user_id = request.args.get('user_id')
+        selected_surveys = request.args.get('selected_surveys')
+        test_mode = request.args.get('test_mode', 'false').lower() == 'true'
+        
+        if test_mode:
+            # Return sample/mock data for test mode
+            return get_sample_text_analytics(survey_type, response_id, selected_surveys)
+        
+        if refresh or not hasattr(g, 'text_analysis_df'):
+            from text_analytics import run_full_analysis  # local heavy import
+            g.text_analysis_df = run_full_analysis(db.session, SurveyResponse, Question)
+
+        df = g.text_analysis_df.copy()
+        
+        # Apply filters if provided
+        if survey_type:
+            # Get survey responses of the specified type
+            survey_responses = SurveyResponse.query.filter(
+                SurveyResponse.survey_type == survey_type,
+                SurveyResponse.status == 'completed'
+            ).all()
+            response_ids = [sr.id for sr in survey_responses]
+            df = df[df['response_id'].isin(response_ids)]
+        
+        if user_id:
+            # Get user's survey responses
+            user_responses = SurveyResponse.query.filter(
+                SurveyResponse.user_id == user_id,
+                SurveyResponse.status == 'completed'
+            ).all()
+            user_response_ids = [ur.id for ur in user_responses]
+            df = df[df['response_id'].isin(user_response_ids)]
+        
+        if selected_surveys:
+            # Filter by selected survey IDs
+            selected_ids = [int(id.strip()) for id in selected_surveys.split(',') if id.strip().isdigit()]
+            if selected_ids:
+                df = df[df['response_id'].isin(selected_ids)]
+        
+        # Drop clean_text column and convert to records
+        payload = df.drop(columns=['clean_text'], errors='ignore').to_dict(orient='records')
+        return jsonify({'success': True, 'results': payload}), 200
+    except Exception as e:
+        logger.error(f"Error generating text analytics: {str(e)}")
+        return jsonify({'error': f'Failed to generate text analytics: {str(e)}'}), 500
 
 # Survey Assignment API Endpoints
 @app.route('/api/assign-survey', methods=['POST'])
