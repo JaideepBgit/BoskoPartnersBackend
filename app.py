@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, g
+from flask import Flask, request, jsonify, g, make_response
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
 from sqlalchemy.dialects.mysql import JSON
@@ -9,6 +9,9 @@ import json
 from datetime import datetime
 import logging
 import traceback
+
+# Disable Numba debug logging
+logging.getLogger('numba').setLevel(logging.WARNING)
 import uuid
 import time
 from sqlalchemy import event
@@ -24,6 +27,10 @@ import csv
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+import requests
+from geopy.geocoders import Nominatim
+from geopy.exc import GeocoderTimedOut, GeocoderServiceError
+import time as time_module
 
 # Ensure .env values override any existing environment variables and are resolved
 # relative to this file's directory, so local edits take effect on reloads.
@@ -1159,6 +1166,186 @@ The Saurara Research Team"""
         logger.warning("[EMAIL] SES API failed, trying SMTP method as fallback...")
         return send_welcome_email_smtp(to_email, username, password, firstname, survey_code)
 
+# Geocoding utility functions
+def geocode_address(address_components):
+    """
+    Geocode an address using multiple components and return latitude, longitude
+    
+    Args:
+        address_components (dict): Dictionary containing address components like:
+            - address_line1, address_line2, city, town, province, country, postal_code
+    
+    Returns:
+        tuple: (latitude, longitude) or (None, None) if geocoding fails
+    """
+    try:
+        # Initialize geocoder with a user agent
+        geolocator = Nominatim(user_agent="bosko_partners_survey_app")
+        
+        # Build address string from components
+        address_parts = []
+        
+        # Add address lines
+        if address_components.get('address_line1'):
+            address_parts.append(address_components['address_line1'])
+        if address_components.get('address_line2'):
+            address_parts.append(address_components['address_line2'])
+        
+        # Add city/town
+        if address_components.get('city'):
+            address_parts.append(address_components['city'])
+        elif address_components.get('town'):
+            address_parts.append(address_components['town'])
+        
+        # Add province/state
+        if address_components.get('province'):
+            address_parts.append(address_components['province'])
+        
+        # Add country
+        if address_components.get('country'):
+            address_parts.append(address_components['country'])
+        
+        # Add postal code
+        if address_components.get('postal_code'):
+            address_parts.append(address_components['postal_code'])
+        
+        if not address_parts:
+            logger.warning("No address components provided for geocoding")
+            return None, None
+        
+        # Create full address string
+        full_address = ', '.join(filter(None, address_parts))
+        logger.info(f"Geocoding address: {full_address}")
+        
+        # Attempt geocoding with retry logic
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                location = geolocator.geocode(full_address, timeout=10)
+                if location:
+                    logger.info(f"Successfully geocoded address to: {location.latitude}, {location.longitude}")
+                    return float(location.latitude), float(location.longitude)
+                else:
+                    logger.warning(f"No geocoding results found for address: {full_address}")
+                    break
+            except GeocoderTimedOut:
+                logger.warning(f"Geocoding timeout on attempt {attempt + 1} for address: {full_address}")
+                if attempt < max_retries - 1:
+                    time_module.sleep(1)  # Wait before retry
+                continue
+            except GeocoderServiceError as e:
+                logger.error(f"Geocoding service error: {str(e)}")
+                break
+        
+        return None, None
+        
+    except Exception as e:
+        logger.error(f"Error during geocoding: {str(e)}")
+        return None, None
+
+def update_geo_location_coordinates(geo_location_id):
+    """
+    Update latitude and longitude for a GeoLocation record if they are zero
+    
+    Args:
+        geo_location_id (int): ID of the GeoLocation record to update
+    
+    Returns:
+        bool: True if coordinates were updated, False otherwise
+    """
+    try:
+        geo_location = GeoLocation.query.get(geo_location_id)
+        if not geo_location:
+            logger.warning(f"GeoLocation with ID {geo_location_id} not found")
+            return False
+        
+        # Check if coordinates need updating (are zero or None)
+        lat = float(geo_location.latitude) if geo_location.latitude else 0
+        lng = float(geo_location.longitude) if geo_location.longitude else 0
+        
+        if lat != 0 or lng != 0:
+            logger.info(f"GeoLocation {geo_location_id} already has coordinates: {lat}, {lng}")
+            return False
+        
+        # Prepare address components for geocoding
+        address_components = {
+            'address_line1': geo_location.address_line1,
+            'address_line2': geo_location.address_line2,
+            'city': geo_location.city,
+            'town': geo_location.town,
+            'province': geo_location.province,
+            'country': geo_location.country,
+            'postal_code': geo_location.postal_code
+        }
+        
+        # Attempt geocoding
+        new_lat, new_lng = geocode_address(address_components)
+        
+        if new_lat is not None and new_lng is not None:
+            # Update the database
+            geo_location.latitude = new_lat
+            geo_location.longitude = new_lng
+            db.session.commit()
+            
+            logger.info(f"Updated GeoLocation {geo_location_id} coordinates to: {new_lat}, {new_lng}")
+            return True
+        else:
+            logger.warning(f"Failed to geocode address for GeoLocation {geo_location_id}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Error updating coordinates for GeoLocation {geo_location_id}: {str(e)}")
+        db.session.rollback()
+        return False
+
+def geocode_survey_response_locations(response_data_list):
+    """
+    Process a list of survey response data and geocode any with zero coordinates
+    
+    Args:
+        response_data_list (list): List of survey response dictionaries
+    
+    Returns:
+        list: Updated list with geocoded coordinates where possible
+    """
+    try:
+        for response_data in response_data_list:
+            # Check if coordinates need updating
+            lat = response_data.get('latitude', 0)
+            lng = response_data.get('longitude', 0)
+            
+            # Convert to float for comparison
+            try:
+                lat = float(lat) if lat is not None else 0
+                lng = float(lng) if lng is not None else 0
+            except (ValueError, TypeError):
+                lat = lng = 0
+            
+            if lat == 0 and lng == 0:
+                # Try to geocode using available address information
+                # Handle different field names from different endpoints
+                address_components = {
+                    'address_line1': response_data.get('physical_address') or response_data.get('address_line1'),
+                    'city': response_data.get('city'),
+                    'town': response_data.get('town'),
+                    'province': response_data.get('state') or response_data.get('province'),
+                    'country': response_data.get('country'),
+                    'postal_code': response_data.get('postal_code')
+                }
+                
+                new_lat, new_lng = geocode_address(address_components)
+                
+                if new_lat is not None and new_lng is not None:
+                    response_data['latitude'] = new_lat
+                    response_data['longitude'] = new_lng
+                    logger.info(f"Geocoded response {response_data.get('id', 'unknown')} to: {new_lat}, {new_lng}")
+        
+        return response_data_list
+        
+    except Exception as e:
+        logger.error(f"Error geocoding survey response locations: {str(e)}")
+        return response_data_list
+
 # Initialize Flask app and SQLAlchemy
 app = Flask(__name__)
 
@@ -1208,7 +1395,7 @@ if env_user and env_password and env_host and env_name:
 if not db_url:
     # Local defaults
     local_db_user     = 'root'
-    local_db_password = 'rootroot'
+    local_db_password = 'jaideep'
     local_db_host     = 'localhost'
     local_db_port     = '3306'
     local_db_name     = 'boskopartnersdb'
@@ -1677,6 +1864,16 @@ def login():
     user = User.query.filter((User.username == identifier) | (User.email == identifier)).first()
     if not user:
         return jsonify({"error": "User not found"}), 404
+    
+    # Log user's geographic information on login
+    if user.geo_location_id:
+        geo_location = GeoLocation.query.get(user.geo_location_id)
+        if geo_location:
+            logger.info(f"User {user.id} ({user.username}) logging in with geographic data: lat={geo_location.latitude}, lng={geo_location.longitude}, city={geo_location.city}, country={geo_location.country}")
+        else:
+            logger.info(f"User {user.id} ({user.username}) has geo_location_id {user.geo_location_id} but no geo location found")
+    else:
+        logger.info(f"User {user.id} ({user.username}) has no geo_location_id")
     
     # NOTE: In production, passwords should be hashed. This is for demonstration only.
     if user.password != password:
@@ -3567,12 +3764,29 @@ def get_user_organizations(user_id):
     try:
         # Get the user
         user = User.query.get_or_404(user_id)
+        logger.info(f"Fetching organizations for user {user_id}")
+        
+        # Log user's geographic information
+        if user.geo_location_id:
+            user_geo = GeoLocation.query.get(user.geo_location_id)
+            if user_geo:
+                logger.info(f"User {user_id} geographic data: lat={user_geo.latitude}, lng={user_geo.longitude}, city={user_geo.city}, country={user_geo.country}")
+            else:
+                logger.info(f"User {user_id} has geo_location_id {user.geo_location_id} but no geo location found")
+        else:
+            logger.info(f"User {user_id} has no geo_location_id")
         
         # Get user's primary organization
         organizations = []
         if user.organization_id:
             primary_org = Organization.query.get(user.organization_id)
             if primary_org:
+                # Log organization's geographic information
+                if primary_org.geo_location:
+                    logger.info(f"Primary organization {primary_org.id} geographic data: lat={primary_org.geo_location.latitude}, lng={primary_org.geo_location.longitude}, city={primary_org.geo_location.city}, country={primary_org.geo_location.country}")
+                else:
+                    logger.info(f"Primary organization {primary_org.id} has no geo_location")
+                
                 organizations.append({
                     'id': primary_org.id,
                     'name': primary_org.name,
@@ -3581,7 +3795,9 @@ def get_user_organizations(user_id):
                     },
                     'geo_location': {
                         'city': primary_org.geo_location.city if primary_org.geo_location else None,
-                        'country': primary_org.geo_location.country if primary_org.geo_location else None
+                        'country': primary_org.geo_location.country if primary_org.geo_location else None,
+                        'latitude': primary_org.geo_location.latitude if primary_org.geo_location else None,
+                        'longitude': primary_org.geo_location.longitude if primary_org.geo_location else None
                     } if primary_org.geo_location else None,
                     'is_primary': True
                 })
@@ -3595,6 +3811,12 @@ def get_user_organizations(user_id):
         ).all()
         
         for org in additional_orgs:
+            # Log organization's geographic information
+            if org.geo_location:
+                logger.info(f"Additional organization {org.id} geographic data: lat={org.geo_location.latitude}, lng={org.geo_location.longitude}, city={org.geo_location.city}, country={org.geo_location.country}")
+            else:
+                logger.info(f"Additional organization {org.id} has no geo_location")
+            
             organizations.append({
                 'id': org.id,
                 'name': org.name,
@@ -3603,11 +3825,14 @@ def get_user_organizations(user_id):
                 },
                 'geo_location': {
                     'city': org.geo_location.city if org.geo_location else None,
-                    'country': org.geo_location.country if org.geo_location else None
+                    'country': org.geo_location.country if org.geo_location else None,
+                    'latitude': org.geo_location.latitude if org.geo_location else None,
+                    'longitude': org.geo_location.longitude if org.geo_location else None
                 } if org.geo_location else None,
                 'is_primary': False
             })
         
+        logger.info(f"Returning {len(organizations)} organizations for user {user_id}")
         return jsonify({
             'organizations': organizations,
             'count': len(organizations)
@@ -4335,84 +4560,88 @@ def add_user():
         )
         db.session.add(user_org_role)
     
-    # Create survey response record automatically
-    try:
-        # Get template_id from request data or use default
-        template_id = data.get('template_id')
-        
-        if not template_id:
-            # Try to get the first available template as default
-            default_template = SurveyTemplate.query.first()
-            if default_template:
-                template_id = default_template.id
-            else:
-                # Create a default template if none exists
-                logger.warning("No templates found, creating a default template")
-                
-                # First, ensure there's a template version
-                if new_user.organization_id:
-                    org_id = new_user.organization_id
+    # Create survey response record automatically - for all roles EXCEPT admin/contact roles
+    excluded_roles = ['admin', 'root', 'primary_contact', 'secondary_contact']
+    if validated_role.lower() not in [role.lower() for role in excluded_roles]:
+        try:
+            # Get template_id from request data or use default
+            template_id = data.get('template_id')
+            
+            if not template_id:
+                # Try to get the first available template as default
+                default_template = SurveyTemplate.query.first()
+                if default_template:
+                    template_id = default_template.id
                 else:
-                    # Use the first organization or create a default one
-                    first_org = Organization.query.first()
-                    if first_org:
-                        org_id = first_org.id
+                    # Create a default template if none exists
+                    logger.warning("No templates found, creating a default template")
+                    
+                    # First, ensure there's a template version
+                    if new_user.organization_id:
+                        org_id = new_user.organization_id
                     else:
-                        # This shouldn't happen in normal operation, but handle gracefully
-                        logger.error("No organizations found, cannot create default template")
-                        raise Exception("No organizations available for template creation")
-                
-                # Create default template version
-                default_version = SurveyTemplateVersion(
-                    name="Default Survey Template",
-                    description="Auto-generated default template for new users",
-                    organization_id=org_id
-                )
-                db.session.add(default_version)
-                db.session.flush()
-                
-                # Create default template
-                default_template = SurveyTemplate(
-                    version_id=default_version.id,
-                    survey_code=f"default-template-{str(uuid.uuid4())[:8]}",
-                    questions=[{"question": "Welcome survey - please update with real questions"}],
-                    sections=["General"]
-                )
-                db.session.add(default_template)
-                db.session.flush()
-                template_id = default_template.id
-        
-        # Verify template exists
-        template = SurveyTemplate.query.get(template_id)
-        if not template:
-            raise Exception(f"Template with ID {template_id} not found")
-        
-        # Calculate dates
-        current_date = datetime.now()
-        start_date = current_date
-        end_date = current_date + timedelta(days=15)
-        
-        # Generate unique survey response code
-        response_survey_code = str(uuid.uuid4())
-        
-        # Create survey response
-        survey_response = SurveyResponse(
-            template_id=template_id,
-            user_id=new_user.id,
-            answers={},  # Empty JSON object as required
-            status='pending',
-            survey_code=response_survey_code,
-            start_date=start_date,
-            end_date=end_date
-        )
-        
-        db.session.add(survey_response)
-        logger.info(f"Created survey response for user {new_user.username} with template_id {template_id}")
-        
-    except Exception as e:
-        logger.error(f"Failed to create survey response for user {new_user.username}: {str(e)}")
-        # Don't fail user creation if survey response creation fails
-        pass
+                        # Use the first organization or create a default one
+                        first_org = Organization.query.first()
+                        if first_org:
+                            org_id = first_org.id
+                        else:
+                            # This shouldn't happen in normal operation, but handle gracefully
+                            logger.error("No organizations found, cannot create default template")
+                            raise Exception("No organizations available for template creation")
+                    
+                    # Create default template version
+                    default_version = SurveyTemplateVersion(
+                        name="Default Survey Template",
+                        description="Auto-generated default template for new users",
+                        organization_id=org_id
+                    )
+                    db.session.add(default_version)
+                    db.session.flush()
+                    
+                    # Create default template
+                    default_template = SurveyTemplate(
+                        version_id=default_version.id,
+                        survey_code=f"default-template-{str(uuid.uuid4())[:8]}",
+                        questions=[{"question": "Welcome survey - please update with real questions"}],
+                        sections=["General"]
+                    )
+                    db.session.add(default_template)
+                    db.session.flush()
+                    template_id = default_template.id
+            
+            # Verify template exists
+            template = SurveyTemplate.query.get(template_id)
+            if not template:
+                raise Exception(f"Template with ID {template_id} not found")
+            
+            # Calculate dates
+            current_date = datetime.now()
+            start_date = current_date
+            end_date = current_date + timedelta(days=15)
+            
+            # Generate unique survey response code
+            response_survey_code = str(uuid.uuid4())
+            
+            # Create survey response
+            survey_response = SurveyResponse(
+                template_id=template_id,
+                user_id=new_user.id,
+                answers={},  # Empty JSON object as required
+                status='pending',
+                survey_code=response_survey_code,
+                start_date=start_date,
+                end_date=end_date
+            )
+            
+            db.session.add(survey_response)
+            logger.info(f"Created survey response for user {new_user.username} with template_id {template_id}")
+            
+        except Exception as e:
+            logger.error(f"Failed to create survey response for user {new_user.username}: {str(e)}")
+            # Don't fail user creation if survey response creation fails
+            pass
+    else:
+        logger.info(f"Skipping survey response creation for user {new_user.username} with role '{validated_role}' - excluded roles (admin, root, primary_contact, secondary_contact) do not get survey assignments")
     
     db.session.commit()
     
@@ -7417,17 +7646,41 @@ def get_textual_analytics():
         selected_surveys = request.args.get('selected_surveys')
         test_mode = request.args.get('test_mode', 'false').lower() == 'true'
         
+        logger.info(f"Text analytics request - refresh: {refresh}, survey_type: {survey_type}, response_id: {response_id}, user_id: {user_id}, selected_surveys: {selected_surveys}, test_mode: {test_mode}")
+        
         if test_mode:
             # Return sample/mock data for test mode
+            logger.info("Returning sample text analytics for test mode")
             return get_sample_text_analytics(survey_type, response_id, selected_surveys)
         
+        # Check if we have open-ended answers in the database before running analysis
+        from text_analytics import fetch_open_ended_answers
+        logger.info("Checking for open-ended answers in database...")
+        open_ended_df = fetch_open_ended_answers(db.session, SurveyResponse, Question)
+        logger.info(f"Found {len(open_ended_df)} open-ended answers in database")
+        
+        if open_ended_df.empty:
+            logger.warning("No open-ended answers found in database. Returning empty results.")
+            return jsonify({'success': True, 'results': [], 'message': 'No open-ended answers found in database'}), 200
+        
         if refresh or not hasattr(g, 'text_analysis_df'):
+            logger.info("Running full text analysis...")
             from text_analytics import run_full_analysis  # local heavy import
-            g.text_analysis_df = run_full_analysis(db.session, SurveyResponse, Question)
+            try:
+                g.text_analysis_df = run_full_analysis(db.session, SurveyResponse, Question)
+                logger.info(f"Text analysis completed successfully. Results shape: {g.text_analysis_df.shape}")
+            except ValueError as ve:
+                if "No open-ended answers found in database" in str(ve):
+                    logger.warning("No open-ended answers found during analysis. Returning empty results.")
+                    return jsonify({'success': True, 'results': [], 'message': 'No open-ended answers found in database'}), 200
+                else:
+                    raise ve
 
         df = g.text_analysis_df.copy()
+        logger.info(f"Using cached text analysis data. Shape: {df.shape}")
         
         # Apply filters if provided
+        original_count = len(df)
         if survey_type:
             # Get survey responses of the specified type
             survey_responses = SurveyResponse.query.filter(
@@ -7436,6 +7689,7 @@ def get_textual_analytics():
             ).all()
             response_ids = [sr.id for sr in survey_responses]
             df = df[df['response_id'].isin(response_ids)]
+            logger.info(f"Filtered by survey_type '{survey_type}'. Reduced from {original_count} to {len(df)} records.")
         
         if user_id:
             # Get user's survey responses
@@ -7445,19 +7699,24 @@ def get_textual_analytics():
             ).all()
             user_response_ids = [ur.id for ur in user_responses]
             df = df[df['response_id'].isin(user_response_ids)]
+            logger.info(f"Filtered by user_id '{user_id}'. Reduced from {original_count} to {len(df)} records.")
         
         if selected_surveys:
             # Filter by selected survey IDs
             selected_ids = [int(id.strip()) for id in selected_surveys.split(',') if id.strip().isdigit()]
             if selected_ids:
+                original_count = len(df)
                 df = df[df['response_id'].isin(selected_ids)]
+                logger.info(f"Filtered by selected_surveys. Reduced from {original_count} to {len(df)} records.")
         
         # Drop clean_text column and convert to records
         payload = df.drop(columns=['clean_text'], errors='ignore').to_dict(orient='records')
+        logger.info(f"Returning {len(payload)} text analytics results")
         return jsonify({'success': True, 'results': payload}), 200
     except Exception as e:
         logger.error(f"Error generating text analytics: {str(e)}")
-        return jsonify({'error': f'Failed to generate text analytics: {str(e)}'}), 500
+        logger.error(traceback.format_exc())
+        return jsonify({'error': f'Failed to generate text analytics: {str(e)}', 'success': False}), 500
 
 # Survey Assignment API Endpoints
 @app.route('/api/assign-survey', methods=['POST'])
@@ -7653,7 +7912,7 @@ def get_user_survey_assignments(user_id):
                     logger.warning(f"Assignment {assignment.id} has no template")
                 
                 assignment_data = {
-                    'id': assignment.lid,
+                    'id': assignment.id,
                     'template_id': assignment.template_id,
                     'template_name': template_name,
                     'survey_code': survey_code,  # Now from SurveyTemplate table
@@ -7932,71 +8191,233 @@ def get_survey_templates_by_organization(org_id):
 
 
 # User Reports API endpoints for analytics
-@app.route('/api/survey-responses/church', methods=['GET'])
-def get_church_survey_responses():
-    """Get church survey responses for analytics"""
+@app.route('/api/survey-responses/admin/test', methods=['GET'])
+def test_admin_endpoint():
+    """Test endpoint to verify admin routes are working"""
+    logger.info("Test admin endpoint called")
+    return jsonify({'status': 'success', 'message': 'Admin endpoint is working'}), 200
+
+@app.route('/api/survey-responses/admin/geo', methods=['GET', 'OPTIONS'])
+def get_admin_survey_responses_with_geo():
+    """Get all survey responses with geographic data from geo_locations table"""
+    # Handle CORS preflight request
+    if request.method == 'OPTIONS':
+        response = make_response()
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+        response.headers.add('Access-Control-Allow-Methods', 'GET,OPTIONS')
+        return response
+    
+    logger.info("Admin survey responses with geo data endpoint called")
     try:
-        # This is a placeholder - you'll need to implement the actual logic
-        # based on how you identify church surveys in your database
+        # Get optional survey type filter from query parameters
+        survey_type_filter = request.args.get('survey_type')
         
-        # Example: assuming you have a way to identify church templates
-        # You might need to filter by template name, organization type, etc.
+        # Query all survey responses with user, organization, and geo location information
+        logger.info("Querying survey responses with geo location data")
+        responses = db.session.query(SurveyResponse)\
+            .join(User, SurveyResponse.user_id == User.id)\
+            .outerjoin(Organization, User.organization_id == Organization.id)\
+            .outerjoin(OrganizationType, Organization.type == OrganizationType.id)\
+            .outerjoin(GeoLocation, User.geo_location_id == GeoLocation.id)\
+            .all()
         
-        responses = SurveyResponse.query.join(SurveyTemplate).filter(
-            # Add your church survey identification logic here
-            # For example: SurveyTemplate.name.contains('church')
-        ).all()
+        logger.info(f"Found {len(responses)} total survey responses to process")
         
-        result = []
+        result = {
+            'church': [],
+            'institution': [],
+            'nonFormal': [],
+            'other': []
+        }
+        
         for response in responses:
-            # Transform the response data to match frontend expectations
+            # Determine survey type based on user's organization type
+            survey_type = 'other'  # Default
+            org_type_name = None
+            
+            if response.user and response.user.organization and response.user.organization.organization_type:
+                org_type_name = response.user.organization.organization_type.type
+                logger.debug(f"Processing organization type: '{org_type_name}'")
+                # Normalize organization type name for comparison
+                org_type_normalized = org_type_name.lower().strip()
+                
+                if org_type_normalized == 'church':
+                    survey_type = 'church'
+                elif org_type_normalized == 'institution':
+                    survey_type = 'institution'
+                elif org_type_normalized in ['non_formal_organizations', 'non-formal', 'non_formal']:
+                    survey_type = 'nonFormal'
+                else:
+                    logger.warning(f"Unknown organization type: '{org_type_name}' (normalized: '{org_type_normalized}') - assigning to 'other'")
+            
+            # Skip if survey type filter is applied and doesn't match
+            if survey_type_filter and survey_type != survey_type_filter:
+                continue
+            
+            # Build response data
             response_data = {
                 'id': response.id,
-                'survey_type': 'church',
+                'survey_type': survey_type,
                 'response_date': response.created_at.isoformat() if response.created_at else None,
                 'template_id': response.template_id,
                 'user_id': response.user_id,
                 'status': response.status,
-                'answers': response.answers  # This contains the survey answers
+                'answers': response.answers,
+                'organization_type_name': org_type_name
             }
             
-            # Extract user information if available
+            # Extract user and organization information
             if response.user:
-                user_details = response.user.user_details
-                if user_details:
+                user = response.user
+                response_data.update({
+                    'user_name': f"{user.firstname or ''} {user.lastname or ''}".strip(),
+                    'user_email': user.email,
+                })
+                
+                # Get organization information
+                if user.organization:
+                    org = user.organization
                     response_data.update({
-                        'church_name': user_details.get('organization_name'),
-                        'pastor_name': f"{user_details.get('first_name', '')} {user_details.get('last_name', '')}".strip(),
-                        'city': user_details.get('city'),
-                        'country': user_details.get('country'),
-                        'physical_address': user_details.get('address'),
-                        # Add other fields based on your user_details structure
+                        'organization_id': org.id,
+                        'organization_name': org.name,
+                        'organization_type_id': org.type,
                     })
+                
+                # Extract user details if available
+                user_details_list = user.user_details
+                if user_details_list and len(user_details_list) > 0:
+                    user_details = user_details_list[0]
+                    form_data = user_details.form_data or {}
+                    
+                    # Add common fields
+                    response_data.update({
+                        'city': form_data.get('city'),
+                        'country': form_data.get('country'),
+                        'physical_address': form_data.get('address'),
+                        'town': form_data.get('town'),
+                        'age_group': form_data.get('age_group'),
+                        'education_level': form_data.get('education_level'),
+                    })
+                    
+                    # Add survey-type specific fields
+                    if survey_type == 'church':
+                        response_data.update({
+                            'church_name': form_data.get('organization_name') or response_data.get('organization_name'),
+                            'pastor_name': f"{form_data.get('first_name', '')} {form_data.get('last_name', '')}".strip() or response_data.get('user_name'),
+                        })
+                    elif survey_type == 'institution':
+                        response_data.update({
+                            'institution_name': form_data.get('organization_name') or response_data.get('organization_name'),
+                            'president_name': f"{form_data.get('first_name', '')} {form_data.get('last_name', '')}".strip() or response_data.get('user_name'),
+                        })
+                    elif survey_type == 'nonFormal':
+                        response_data.update({
+                            'ministry_name': form_data.get('organization_name') or response_data.get('organization_name'),
+                            'leader_name': f"{form_data.get('first_name', '')} {form_data.get('last_name', '')}".strip() or response_data.get('user_name'),
+                        })
             
-            result.append(response_data)
+            # Add geographic location data from geo_locations table
+            if response.user and response.user.geo_location:
+                geo = response.user.geo_location
+                logger.info(f"Response {response.id} geo data: lat={geo.latitude}, lng={geo.longitude}, city={geo.city}, country={geo.country}")
+                response_data.update({
+                    'physical_address': geo.address_line1 or response_data.get('physical_address'),
+                    'city': geo.city or response_data.get('city'),
+                    'town': geo.town or response_data.get('town'),
+                    'country': geo.country or response_data.get('country'),
+                    'state': geo.province,  # Using province as state
+                    'postal_code': geo.postal_code,
+                    'latitude': geo.latitude,
+                    'longitude': geo.longitude,
+                    'timezone': None  # GeoLocation model doesn't have timezone field
+                })
+            
+            # Add to appropriate survey type group
+            result[survey_type].append(response_data)
         
+        # Apply geocoding to responses with zero coordinates
+        logger.info("Applying geocoding to responses with zero coordinates...")
+        for survey_type in result:
+            if result[survey_type]:
+                result[survey_type] = geocode_survey_response_locations(result[survey_type])
+        
+        # If survey type filter is applied, return only that type
+        if survey_type_filter:
+            logger.info(f"Found {len(result[survey_type_filter])} {survey_type_filter} survey responses")
+            return jsonify(result[survey_type_filter]), 200
+        
+        # Return all grouped by survey type
+        total_responses = sum(len(responses) for responses in result.values())
+        logger.info(f"Found {total_responses} total survey responses: Church({len(result['church'])}), Institution({len(result['institution'])}), Non-Formal Organizations({len(result['nonFormal'])}), Other({len(result['other'])})")
         return jsonify(result), 200
         
     except Exception as e:
-        logger.error(f"Error fetching church survey responses: {str(e)}")
+        logger.error(f"Error fetching admin survey responses with geo: {str(e)}")
         logger.error(traceback.format_exc())
-        return jsonify({'error': f'Failed to fetch church survey responses: {str(e)}'}), 500
+        return jsonify({'error': f'Failed to fetch survey responses: {str(e)}'}), 500
 
-
-@app.route('/api/survey-responses/institution', methods=['GET'])
-def get_institution_survey_responses():
-    """Get institution survey responses for analytics"""
+@app.route('/api/survey-responses/admin', methods=['GET', 'OPTIONS'])
+def get_admin_survey_responses():
+    """Get all survey responses for admin reports - automatically determines survey type from user's organization type"""
+    # Handle CORS preflight request
+    if request.method == 'OPTIONS':
+        response = make_response()
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+        response.headers.add('Access-Control-Allow-Methods', 'GET,OPTIONS')
+        return response
+    
+    logger.info("Admin survey responses endpoint called")
     try:
-        # Placeholder for institution surveys
-        responses = SurveyResponse.query.join(SurveyTemplate).filter(
-            # Add your institution survey identification logic here
-        ).all()
+        # Get optional survey type filter from query parameters
+        survey_type_filter = request.args.get('survey_type')
         
-        result = []
+        # Query all survey responses with user and organization information
+        logger.info("Querying survey responses with organization data")
+        responses = db.session.query(SurveyResponse)\
+            .join(User, SurveyResponse.user_id == User.id)\
+            .outerjoin(Organization, User.organization_id == Organization.id)\
+            .outerjoin(OrganizationType, Organization.type == OrganizationType.id)\
+            .all()
+        
+        logger.info(f"Found {len(responses)} total survey responses to process")
+        
+        result = {
+            'church': [],
+            'institution': [],
+            'nonFormal': [],
+            'other': []
+        }
+        
         for response in responses:
+            # Determine survey type based on user's organization type
+            survey_type = 'other'  # Default
+            org_type_name = None
+            
+            if response.user and response.user.organization and response.user.organization.organization_type:
+                org_type_name = response.user.organization.organization_type.type
+                logger.debug(f"Processing organization type: '{org_type_name}'")
+                # Normalize organization type name for comparison
+                org_type_normalized = org_type_name.lower().strip()
+                
+                if org_type_normalized == 'church':
+                    survey_type = 'church'
+                elif org_type_normalized == 'institution':
+                    survey_type = 'institution'
+                elif org_type_normalized in ['non_formal_organizations', 'non-formal', 'non_formal']:
+                    survey_type = 'nonFormal'
+                else:
+                    logger.warning(f"Unknown organization type: '{org_type_name}' (normalized: '{org_type_normalized}') - assigning to 'other'")
+            
+            # Skip if survey type filter is applied and doesn't match
+            if survey_type_filter and survey_type != survey_type_filter:
+                continue
+            
+            # Build response data
             response_data = {
                 'id': response.id,
-                'survey_type': 'institution',
+                'survey_type': survey_type,
                 'response_date': response.created_at.isoformat() if response.created_at else None,
                 'template_id': response.template_id,
                 'user_id': response.user_id,
@@ -8004,68 +8425,259 @@ def get_institution_survey_responses():
                 'answers': response.answers
             }
             
+            # Extract user and organization information
             if response.user:
-                user_details = response.user.user_details
-                if user_details:
+                user = response.user
+                response_data.update({
+                    'user_name': f"{user.firstname or ''} {user.lastname or ''}".strip(),
+                    'user_email': user.email,
+                })
+                
+                # Get organization information
+                if user.organization:
+                    org = user.organization
                     response_data.update({
-                        'institution_name': user_details.get('organization_name'),
-                        'president_name': f"{user_details.get('first_name', '')} {user_details.get('last_name', '')}".strip(),
-                        'city': user_details.get('city'),
-                        'country': user_details.get('country'),
-                        'physical_address': user_details.get('address'),
+                        'organization_id': org.id,
+                        'organization_name': org.name,
+                        'organization_type_id': org.type,
+                        'organization_type_name': org_type_name
                     })
+                
+                # Extract user details if available
+                user_details_list = user.user_details
+                if user_details_list and len(user_details_list) > 0:
+                    user_details = user_details_list[0]
+                    form_data = user_details.form_data or {}
+                    
+                    # Add common fields
+                    response_data.update({
+                        'city': form_data.get('city'),
+                        'country': form_data.get('country'),
+                        'physical_address': form_data.get('address'),
+                        'town': form_data.get('town'),
+                        'age_group': form_data.get('age_group'),
+                        'education_level': form_data.get('education_level'),
+                    })
+                    
+                    # Add survey-type specific fields
+                    if survey_type == 'church':
+                        response_data.update({
+                            'church_name': form_data.get('organization_name') or response_data.get('organization_name'),
+                            'pastor_name': f"{form_data.get('first_name', '')} {form_data.get('last_name', '')}".strip() or response_data.get('user_name'),
+                        })
+                    elif survey_type == 'institution':
+                        response_data.update({
+                            'institution_name': form_data.get('organization_name') or response_data.get('organization_name'),
+                            'president_name': f"{form_data.get('first_name', '')} {form_data.get('last_name', '')}".strip() or response_data.get('user_name'),
+                        })
+                    elif survey_type == 'nonFormal':
+                        response_data.update({
+                            'ministry_name': form_data.get('organization_name') or response_data.get('organization_name'),
+                            'leader_name': f"{form_data.get('first_name', '')} {form_data.get('last_name', '')}".strip() or response_data.get('user_name'),
+                        })
             
-            result.append(response_data)
+            # Log geographic data for debugging
+            if 'latitude' in response_data and 'longitude' in response_data:
+                logger.info(f"Response {response.id} - Survey Type: {survey_type}, Lat: {response_data['latitude']}, Lng: {response_data['longitude']}")
+            
+            # Add to appropriate survey type group
+            result[survey_type].append(response_data)
         
+        # Apply geocoding to responses with zero coordinates
+        logger.info("Applying geocoding to responses with zero coordinates...")
+        for survey_type in result:
+            if result[survey_type]:
+                result[survey_type] = geocode_survey_response_locations(result[survey_type])
+        
+        # If survey type filter is applied, return only that type
+        if survey_type_filter:
+            logger.info(f"Found {len(result[survey_type_filter])} {survey_type_filter} survey responses")
+            return jsonify(result[survey_type_filter]), 200
+        
+        # Return all grouped by survey type
+        total_responses = sum(len(responses) for responses in result.values())
+        logger.info(f"Found {total_responses} total survey responses: Church({len(result['church'])}), Institution({len(result['institution'])}), Non-Formal Organizations({len(result['nonFormal'])}), Other({len(result['other'])})")
         return jsonify(result), 200
         
     except Exception as e:
-        logger.error(f"Error fetching institution survey responses: {str(e)}")
+        logger.error(f"Error fetching admin survey responses with geo: {str(e)}")
         logger.error(traceback.format_exc())
-        return jsonify({'error': f'Failed to fetch institution survey responses: {str(e)}'}), 500
+        return jsonify({'error': f'Failed to fetch survey responses: {str(e)}'}), 500
 
-
-@app.route('/api/survey-responses/non-formal', methods=['GET'])
-def get_non_formal_survey_responses():
-    """Get non-formal survey responses for analytics"""
+@app.route('/api/geocode/batch-update', methods=['POST', 'OPTIONS'])
+def batch_update_coordinates():
+    """Batch update coordinates for GeoLocation records with zero lat/lng"""
+    # Handle CORS preflight request
+    if request.method == 'OPTIONS':
+        response = make_response()
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+        response.headers.add('Access-Control-Allow-Methods', 'POST,OPTIONS')
+        return response
+    
     try:
-        # Placeholder for non-formal surveys
-        responses = SurveyResponse.query.join(SurveyTemplate).filter(
-            # Add your non-formal survey identification logic here
-        ).all()
+        # Get optional limit parameter
+        data = request.get_json() or {}
+        limit = data.get('limit', 50)  # Default to 50 records to avoid overwhelming the geocoding service
         
-        result = []
-        for response in responses:
-            response_data = {
-                'id': response.id,
-                'survey_type': 'non_formal',
-                'response_date': response.created_at.isoformat() if response.created_at else None,
-                'template_id': response.template_id,
-                'user_id': response.user_id,
-                'status': response.status,
-                'answers': response.answers
+        logger.info(f"Starting batch geocoding update for up to {limit} records")
+        
+        # Find GeoLocation records with zero coordinates
+        geo_locations = db.session.query(GeoLocation)\
+            .filter(
+                (GeoLocation.latitude == 0) | (GeoLocation.latitude == None),
+                (GeoLocation.longitude == 0) | (GeoLocation.longitude == None)
+            )\
+            .limit(limit)\
+            .all()
+        
+        logger.info(f"Found {len(geo_locations)} GeoLocation records with zero coordinates")
+        
+        updated_count = 0
+        failed_count = 0
+        results = []
+        
+        for geo_location in geo_locations:
+            try:
+                success = update_geo_location_coordinates(geo_location.id)
+                if success:
+                    updated_count += 1
+                    results.append({
+                        'id': geo_location.id,
+                        'status': 'updated',
+                        'address': f"{geo_location.address_line1 or ''}, {geo_location.city or ''}, {geo_location.country or ''}".strip(', ')
+                    })
+                else:
+                    failed_count += 1
+                    results.append({
+                        'id': geo_location.id,
+                        'status': 'failed',
+                        'address': f"{geo_location.address_line1 or ''}, {geo_location.city or ''}, {geo_location.country or ''}".strip(', ')
+                    })
+                
+                # Add a small delay to be respectful to the geocoding service
+                time_module.sleep(0.5)
+                
+            except Exception as e:
+                logger.error(f"Error updating GeoLocation {geo_location.id}: {str(e)}")
+                failed_count += 1
+                results.append({
+                    'id': geo_location.id,
+                    'status': 'error',
+                    'error': str(e),
+                    'address': f"{geo_location.address_line1 or ''}, {geo_location.city or ''}, {geo_location.country or ''}".strip(', ')
+                })
+        
+        logger.info(f"Batch geocoding completed: {updated_count} updated, {failed_count} failed")
+        
+        return jsonify({
+            'success': True,
+            'message': f'Batch geocoding completed',
+            'summary': {
+                'total_processed': len(geo_locations),
+                'updated': updated_count,
+                'failed': failed_count
+            },
+            'results': results
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error in batch geocoding update: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': f'Failed to perform batch geocoding: {str(e)}'}), 500
+
+def geocode_address_google(address):
+    """Geocode an address using Google Maps API from environment variable"""
+    if not address or not address.strip():
+        return None
+        
+    try:
+        api_key = os.getenv('REACT_APP_GOOGLE_MAPS_API_KEY')
+        if not api_key:
+            logger.error("❌ REACT_APP_GOOGLE_MAPS_API_KEY not found in environment variables")
+            return None
+            
+        logger.info(f"🔍 Geocoding address: {address}")
+        
+        params = {
+            'address': address.strip(),
+            'key': api_key
+        }
+        
+        response = requests.get(
+            'https://maps.googleapis.com/maps/api/geocode/json', 
+            params=params, 
+            timeout=10
+        )
+        response.raise_for_status()
+        
+        data = response.json()
+        
+        if data['status'] == 'OK' and data['results']:
+            result = data['results'][0]
+            location = result['geometry']['location']
+            
+            geocoded_data = {
+                'latitude': location['lat'],
+                'longitude': location['lng'],
+                'formatted_address': result['formatted_address'],
+                'success': True
             }
             
-            if response.user:
-                user_details = response.user.user_details
-                if user_details:
-                    response_data.update({
-                        'ministry_name': user_details.get('organization_name'),
-                        'leader_name': f"{user_details.get('first_name', '')} {user_details.get('last_name', '')}".strip(),
-                        'city': user_details.get('city'),
-                        'country': user_details.get('country'),
-                        'physical_address': user_details.get('address'),
-                    })
+            logger.info(f"✅ Successfully geocoded: {geocoded_data['formatted_address']} -> {location['lat']}, {location['lng']}")
+            return geocoded_data
             
-            result.append(response_data)
-        
-        return jsonify(result), 200
-        
+        else:
+            logger.warning(f"⚠️ Geocoding failed for '{address}': {data['status']}")
+            return None
+            
     except Exception as e:
-        logger.error(f"Error fetching non-formal survey responses: {str(e)}")
-        logger.error(traceback.format_exc())
-        return jsonify({'error': f'Failed to fetch non-formal survey responses: {str(e)}'}), 500
+        logger.error(f"❌ Error geocoding '{address}': {str(e)}")
+        return None
 
+def build_address_string(city=None, state=None, country=None, address=None, town=None):
+    """Build a complete address string from components for geocoding"""
+    address_parts = []
+    
+    if address and address.strip():
+        address_parts.append(address.strip())
+    if town and town.strip():
+        address_parts.append(town.strip())
+    if city and city.strip():
+        address_parts.append(city.strip())
+    if state and state.strip():
+        address_parts.append(state.strip())
+    if country and country.strip():
+        address_parts.append(country.strip())
+        
+    return ', '.join(address_parts)
+
+@app.route('/api/geocode', methods=['POST'])
+def geocode_endpoint():
+    """Geocode an address to get latitude/longitude coordinates"""
+    try:
+        data = request.get_json()
+        address = data.get('address', '').strip()
+        city = data.get('city', '').strip()
+        state = data.get('state', '').strip()
+        country = data.get('country', '').strip()
+        
+        # Build full address from components
+        full_address = build_address_string(city, state, country, address)
+        
+        if not full_address:
+            return jsonify({'success': False, 'error': 'Address is required'}), 400
+        
+        result = geocode_address_google(full_address)
+        
+        if result and result.get('success'):
+            return jsonify(result), 200
+        else:
+            return jsonify({'success': False, 'error': 'Geocoding failed'}), 400
+            
+    except Exception as e:
+        logger.error(f"Error in geocode endpoint: {str(e)}")
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/survey-questions', methods=['GET'])
 def get_survey_questions():
@@ -8078,33 +8690,39 @@ def get_survey_questions():
         result = {}
         
         for template in templates:
+            # Get name and description from the version relationship
+            template_name = template.version.name if template.version else f"Template {template.id}"
+            template_description = template.version.description if template.version else "No description available"
+            
             template_data = {
                 'id': template.id,
-                'name': template.name,
-                'description': template.description,
+                'name': template_name,
+                'description': template_description,
                 'questions': []
             }
             
-            # Add questions from the template
-            if hasattr(template, 'questions'):
-                for question in template.questions:
-                    question_data = {
-                        'id': question.id,
-                        'text': question.question_text,
-                        'type': question.question_type,
-                        'required': question.required
-                    }
-                    if hasattr(question, 'options'):
-                        question_data['options'] = question.options
-                    template_data['questions'].append(question_data)
+            # Add questions from the template (questions is a JSON field)
+            if template.questions:
+                # template.questions is a JSON field, so it's already a list/dict
+                if isinstance(template.questions, list):
+                    for i, question in enumerate(template.questions):
+                        question_data = {
+                            'id': i,  # Use index as ID since questions are stored as JSON
+                            'text': question.get('question_text', question.get('text', '')),
+                            'type': question.get('question_type', question.get('type', 'text')),
+                            'required': question.get('required', False)
+                        }
+                        if 'options' in question:
+                            question_data['options'] = question['options']
+                        template_data['questions'].append(question_data)
             
             # Categorize by survey type (you'll need to implement this logic)
             survey_type = 'general'  # Default
-            if 'church' in template.name.lower():
+            if 'church' in template_name.lower():
                 survey_type = 'church_survey'
-            elif 'institution' in template.name.lower():
+            elif 'institution' in template_name.lower():
                 survey_type = 'institution_survey'
-            elif 'non-formal' in template.name.lower():
+            elif 'non-formal' in template_name.lower():
                 survey_type = 'non_formal_survey'
             
             result[survey_type] = template_data
@@ -8131,6 +8749,16 @@ def get_user_survey_responses(user_id):
             return jsonify({'error': 'User not found'}), 404
         
         logger.info(f"Found user: {user.email}")
+        
+        # Log user's geographic information
+        if user.geo_location_id:
+            geo_location = GeoLocation.query.get(user.geo_location_id)
+            if geo_location:
+                logger.info(f"User {user_id} geographic data: lat={geo_location.latitude}, lng={geo_location.longitude}, city={geo_location.city}, country={geo_location.country}")
+            else:
+                logger.info(f"User {user_id} has geo_location_id {user.geo_location_id} but no geo location found")
+        else:
+            logger.info(f"User {user_id} has no geo_location_id")
         
         # Get all survey responses directly from survey_responses table for this user
         survey_responses = db.session.query(SurveyResponse)\
@@ -8165,6 +8793,12 @@ def get_user_survey_responses(user_id):
                 user_id=user_id, which='user'
             ).first()
             
+            # Log geo location data for this response
+            if geo_location:
+                logger.info(f"Response {survey_response.id} geo data: lat={geo_location.latitude}, lng={geo_location.longitude}, city={geo_location.city}, country={geo_location.country}")
+            else:
+                logger.info(f"No geo location data found for response {survey_response.id}")
+            
             response_data = {
                 'id': survey_response.id,
                 'template_id': survey_response.template_id,
@@ -8175,11 +8809,17 @@ def get_user_survey_responses(user_id):
                 'created_at': survey_response.created_at.isoformat() if survey_response.created_at else None,
                 'city': geo_location.city if geo_location else None,
                 'country': geo_location.country if geo_location else None,
+                'latitude': geo_location.latitude if geo_location else None,
+                'longitude': geo_location.longitude if geo_location else None,
                 'education_level': None,  # Not available in current schema
                 'age_group': None  # Not available in current schema
             }
             responses.append(response_data)
-            logger.info(f"Added response {survey_response.id} with type {survey_type}")
+            logger.info(f"Added response {survey_response.id} with type {survey_type}, lat={response_data['latitude']}, lng={response_data['longitude']}")
+        
+        # Apply geocoding to responses with zero coordinates
+        logger.info("Applying geocoding to user responses with zero coordinates...")
+        responses = geocode_survey_response_locations(responses)
         
         logger.info(f"Returning {len(responses)} responses")
         return jsonify({'responses': responses}), 200
@@ -8199,6 +8839,8 @@ def get_similar_survey_comparison():
         response_id = data.get('response_id')
         survey_type = data.get('survey_type')
         selected_surveys = data.get('selected_surveys', [])
+        
+        logger.info(f"Generating similar survey comparison for user_id: {user_id}, response_id: {response_id}, survey_type: {survey_type}")
         
         # Get the target response
         target_response = db.session.query(SurveyResponse).filter_by(id=response_id).first()
@@ -8229,6 +8871,7 @@ def get_similar_survey_comparison():
             query = query.filter(SurveyResponse.id.in_(selected_surveys))
         
         similar_responses = query.all()
+        logger.info(f"Found {len(similar_responses)} similar responses for comparison")
         
         # Calculate comparison statistics
         target_scores = {}
@@ -8284,12 +8927,33 @@ def get_similar_survey_comparison():
             user_id=user_id, which='user'
         ).first()
         
+        # Log target user's geographic information
+        if target_user:
+            if target_user.geo_location_id:
+                user_geo = GeoLocation.query.get(target_user.geo_location_id)
+                if user_geo:
+                    logger.info(f"Target user {user_id} geographic data: lat={user_geo.latitude}, lng={user_geo.longitude}, city={user_geo.city}, country={user_geo.country}")
+                else:
+                    logger.info(f"Target user {user_id} has geo_location_id {target_user.geo_location_id} but no geo location found")
+            else:
+                logger.info(f"Target user {user_id} has no geo_location_id")
+        
+        # Log target geo information
+        if target_geo:
+            logger.info(f"Target response geo data: lat={target_geo.latitude}, lng={target_geo.longitude}, city={target_geo.city}, country={target_geo.country}")
+        else:
+            logger.info(f"No geo location data found for target response")
+        
         target_info = {
             'id': target_response.id,
             'city': target_geo.city if target_geo else None,
             'country': target_geo.country if target_geo else None,
+            'latitude': target_geo.latitude if target_geo else None,
+            'longitude': target_geo.longitude if target_geo else None,
             'template_name': target_template.survey_code if target_template else 'Unknown'
         }
+        
+        logger.info(f"Target info: {target_info}")
         
         return jsonify({
             'target': target_info,
@@ -8306,4 +8970,5 @@ def get_similar_survey_comparison():
 
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(debug=False)
+
