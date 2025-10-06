@@ -2763,35 +2763,56 @@ def copy_template_to_organization(template_id):
             db.session.add(target_version)
             db.session.flush()  # Get the ID
         
-        # Generate unique survey code if not provided
-        if not new_survey_code:
-            new_survey_code = f"{source_template.survey_code}_copy_to_{target_organization.name.lower().replace(' ', '_')}"
+        # Check if we should update an existing template or create a new one
+        existing_template = None
+        if new_survey_code:
+            # If a survey code is provided, check if it exists in the target version
+            existing_template = SurveyTemplate.query.filter_by(
+                version_id=target_version.id,
+                survey_code=new_survey_code
+            ).first()
         
-        # Ensure the survey code is unique
-        counter = 1
-        original_survey_code = new_survey_code
-        while True:
-            existing = SurveyTemplate.query.filter_by(survey_code=new_survey_code).first()
-            if not existing:
-                break
-            new_survey_code = f"{original_survey_code}_{counter}"
-            counter += 1
+        if existing_template:
+            # Update existing template with new questions and sections
+            existing_template.questions = source_template.questions  # Deep copy of questions
+            existing_template.sections = source_template.sections    # Deep copy of sections
+            copied_template = existing_template
+            action = 'updated'
+            logger.info(f"Updated existing template {existing_template.id} in version {target_version.id}")
+        else:
+            # Generate unique survey code if not provided
+            if not new_survey_code:
+                new_survey_code = f"{source_template.survey_code}_copy_to_{target_organization.name.lower().replace(' ', '_')}"
+            
+            # Ensure the survey code is unique across all templates
+            counter = 1
+            original_survey_code = new_survey_code
+            while True:
+                existing = SurveyTemplate.query.filter_by(survey_code=new_survey_code).first()
+                if not existing:
+                    break
+                new_survey_code = f"{original_survey_code}_{counter}"
+                counter += 1
+            
+            # Create the copied template
+            copied_template = SurveyTemplate(
+                version_id=target_version.id,
+                survey_code=new_survey_code,
+                questions=source_template.questions,  # Deep copy of questions
+                sections=source_template.sections     # Deep copy of sections
+            )
+            
+            db.session.add(copied_template)
+            action = 'created'
+            logger.info(f"Created new template {new_survey_code} in version {target_version.id}")
         
-        # Create the copied template
-        copied_template = SurveyTemplate(
-            version_id=target_version.id,
-            survey_code=new_survey_code,
-            questions=source_template.questions,  # Deep copy of questions
-            sections=source_template.sections     # Deep copy of sections
-        )
-        
-        db.session.add(copied_template)
         db.session.commit()
         
         logger.info(f"Template {template_id} copied to organization {target_organization_id} as template {copied_template.id}")
         
         return jsonify({
             'success': True,
+            'action': action,
             'copied_template': {
                 'id': copied_template.id,
                 'survey_code': copied_template.survey_code,
@@ -2800,8 +2821,8 @@ def copy_template_to_organization(template_id):
                 'organization_id': target_organization_id,
                 'organization_name': target_organization.name
             },
-            'message': f'Template successfully copied to {target_organization.name}'
-        }), 201
+            'message': f'Template successfully {action} in {target_organization.name}'
+        }), 201 if action == 'created' else 200
         
     except Exception as e:
         db.session.rollback()
@@ -4260,65 +4281,109 @@ def copy_template_version_to_organization(version_id):
         if source_version.organization_id == target_organization_id:
             return jsonify({'error': 'Cannot copy template version to the same organization'}), 400
         
-        # Generate new version name if not provided
-        if not new_version_name:
-            new_version_name = f"{source_version.name}_copy_from_{source_version.organization.name.lower().replace(' ', '_')}"
-        
-        # Ensure the version name is unique for the target organization
-        counter = 1
-        original_version_name = new_version_name
-        while True:
-            existing = SurveyTemplateVersion.query.filter_by(
+        # Check if we should update an existing version or create a new one
+        existing_version = None
+        if new_version_name:
+            # If a version name is provided, check if it exists in the target organization
+            existing_version = SurveyTemplateVersion.query.filter_by(
                 organization_id=target_organization_id,
                 name=new_version_name
             ).first()
-            if not existing:
-                break
-            new_version_name = f"{original_version_name}_{counter}"
-            counter += 1
         
-        # Create the copied template version
-        copied_version = SurveyTemplateVersion(
-            name=new_version_name,
-            description=f"Copy of '{source_version.name}' from {source_version.organization.name}",
-            organization_id=target_organization_id
-        )
-        
-        db.session.add(copied_version)
-        db.session.flush()  # Get the ID
+        if existing_version:
+            # Use the existing version
+            copied_version = existing_version
+            version_action = 'updated'
+            logger.info(f"Using existing template version {existing_version.id} in organization {target_organization_id}")
+        else:
+            # Generate new version name if not provided
+            if not new_version_name:
+                new_version_name = f"{source_version.name}_copy_from_{source_version.organization.name.lower().replace(' ', '_')}"
+            
+            # Ensure the version name is unique for the target organization
+            counter = 1
+            original_version_name = new_version_name
+            while True:
+                existing = SurveyTemplateVersion.query.filter_by(
+                    organization_id=target_organization_id,
+                    name=new_version_name
+                ).first()
+                if not existing:
+                    break
+                new_version_name = f"{original_version_name}_{counter}"
+                counter += 1
+            
+            # Create the copied template version
+            copied_version = SurveyTemplateVersion(
+                name=new_version_name,
+                description=f"Copy of '{source_version.name}' from {source_version.organization.name}",
+                organization_id=target_organization_id
+            )
+            
+            db.session.add(copied_version)
+            db.session.flush()  # Get the ID
+            version_action = 'created'
+            logger.info(f"Created new template version {new_version_name} in organization {target_organization_id}")
         
         # Get all templates in the source version
         source_templates = SurveyTemplate.query.filter_by(version_id=version_id).all()
         
         copied_templates = []
+        templates_created = 0
+        templates_updated = 0
+        
         for source_template in source_templates:
-            # Generate unique survey code for each template
-            new_survey_code = f"{source_template.survey_code}_copy_to_{target_organization.name.lower().replace(' ', '_')}"
+            # Use the original survey code to check for existing template in target version
+            new_survey_code = source_template.survey_code
             
-            # Ensure the survey code is unique
-            template_counter = 1
-            original_survey_code = new_survey_code
-            while True:
-                existing_template = SurveyTemplate.query.filter_by(survey_code=new_survey_code).first()
-                if not existing_template:
-                    break
-                new_survey_code = f"{original_survey_code}_{template_counter}"
-                template_counter += 1
-            
-            # Create the copied template
-            copied_template = SurveyTemplate(
+            # Check if template with this survey code already exists in the target version
+            existing_template = SurveyTemplate.query.filter_by(
                 version_id=copied_version.id,
-                survey_code=new_survey_code,
-                questions=source_template.questions,  # Deep copy of questions
-                sections=source_template.sections     # Deep copy of sections
-            )
+                survey_code=new_survey_code
+            ).first()
             
-            db.session.add(copied_template)
-            copied_templates.append({
-                'original_id': source_template.id,
-                'original_survey_code': source_template.survey_code,
-                'new_survey_code': new_survey_code
-            })
+            if existing_template:
+                # Update existing template
+                existing_template.questions = source_template.questions
+                existing_template.sections = source_template.sections
+                template_action = 'updated'
+                templates_updated += 1
+                copied_templates.append({
+                    'original_id': source_template.id,
+                    'original_survey_code': source_template.survey_code,
+                    'new_survey_code': new_survey_code,
+                    'action': 'updated'
+                })
+                logger.info(f"Updated existing template {existing_template.id} with survey code {new_survey_code}")
+            else:
+                # Ensure the survey code is unique across all templates
+                template_counter = 1
+                original_survey_code = new_survey_code
+                while True:
+                    existing_any = SurveyTemplate.query.filter_by(survey_code=new_survey_code).first()
+                    if not existing_any:
+                        break
+                    new_survey_code = f"{original_survey_code}_{template_counter}"
+                    template_counter += 1
+                
+                # Create the copied template
+                copied_template = SurveyTemplate(
+                    version_id=copied_version.id,
+                    survey_code=new_survey_code,
+                    questions=source_template.questions,  # Deep copy of questions
+                    sections=source_template.sections     # Deep copy of sections
+                )
+                
+                db.session.add(copied_template)
+                template_action = 'created'
+                templates_created += 1
+                copied_templates.append({
+                    'original_id': source_template.id,
+                    'original_survey_code': source_template.survey_code,
+                    'new_survey_code': new_survey_code,
+                    'action': 'created'
+                })
+                logger.info(f"Created new template with survey code {new_survey_code}")
         
         db.session.commit()
         
@@ -4326,17 +4391,20 @@ def copy_template_version_to_organization(version_id):
         
         return jsonify({
             'success': True,
+            'version_action': version_action,
             'copied_version': {
                 'id': copied_version.id,
                 'name': copied_version.name,
                 'description': copied_version.description,
                 'organization_id': target_organization_id,
                 'organization_name': target_organization.name,
-                'template_count': len(copied_templates)
+                'template_count': len(copied_templates),
+                'templates_created': templates_created,
+                'templates_updated': templates_updated
             },
             'copied_templates': copied_templates,
-            'message': f'Template version successfully copied to {target_organization.name} with {len(copied_templates)} templates'
-        }), 201
+            'message': f'Template version {version_action} in {target_organization.name}: {templates_created} templates created, {templates_updated} templates updated'
+        }), 201 if version_action == 'created' else 200
         
     except Exception as e:
         db.session.rollback()
@@ -7944,6 +8012,57 @@ def get_user_survey_assignments(user_id):
     except Exception as e:
         logger.error(f"Error getting user survey assignments: {str(e)}")
         return jsonify({'error': f'Failed to get user survey assignments: {str(e)}'}), 500
+
+@app.route('/api/users/<int:user_id>/survey-assignments/<int:assignment_id>', methods=['DELETE', 'OPTIONS'])
+def remove_survey_assignment(user_id, assignment_id):
+    """Remove a survey assignment and its associated survey response"""
+    if request.method == 'OPTIONS':
+        response = jsonify({'message': 'CORS preflight successful'})
+        response.headers.add('Access-Control-Allow-Origin', 'http://localhost:3000')
+        response.headers.add('Access-Control-Allow-Methods', 'DELETE, OPTIONS')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+        return response, 200
+    
+    try:
+        # Verify user exists
+        user = User.query.get_or_404(user_id)
+        
+        # Find the survey response (assignment) for this user and assignment ID
+        assignment = SurveyResponse.query.filter_by(
+            id=assignment_id,
+            user_id=user_id
+        ).first()
+        
+        if not assignment:
+            return jsonify({'error': 'Survey assignment not found for this user'}), 404
+        
+        # Get assignment details for logging before deletion
+        template_name = "Unknown"
+        if assignment.template and assignment.template.version:
+            template_name = assignment.template.version.name
+        
+        logger.info(f"Removing survey assignment {assignment_id} (template: {template_name}) for user {user_id}")
+        
+        # Delete the survey response record
+        db.session.delete(assignment)
+        db.session.commit()
+        
+        logger.info(f"Successfully removed survey assignment {assignment_id} for user {user_id}")
+        
+        return jsonify({
+            'success': True,
+            'message': f'Survey assignment removed successfully',
+            'removed_assignment': {
+                'id': assignment_id,
+                'template_name': template_name,
+                'user_id': user_id
+            }
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error removing survey assignment {assignment_id} for user {user_id}: {str(e)}")
+        return jsonify({'error': f'Failed to remove survey assignment: {str(e)}'}), 500
 
 @app.route('/api/email-templates/debug', methods=['GET'])
 def debug_email_templates():
