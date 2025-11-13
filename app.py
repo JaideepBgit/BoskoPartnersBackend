@@ -1798,6 +1798,66 @@ class ReportTemplate(db.Model):
     def __repr__(self):
         return f'<ReportTemplate {self.id}: {self.name}>'
 
+
+class ContactReferral(db.Model):
+    __tablename__ = 'contact_referrals'
+    id = db.Column(db.Integer, primary_key=True)
+    
+    # Primary contact information
+    first_name = db.Column(db.String(100), nullable=False)
+    last_name = db.Column(db.String(100), nullable=False)
+    email = db.Column(db.String(255), nullable=False)
+    full_phone = db.Column(db.String(50), nullable=True)
+    whatsapp = db.Column(db.String(50), nullable=True)
+    preferred_contact = db.Column(db.String(50), nullable=True)
+    type_of_institution = db.Column(db.String(100), nullable=True)
+    institution_name = db.Column(db.String(255), nullable=True)
+    title = db.Column(db.String(100), nullable=True)
+    physical_address = db.Column(db.Text, nullable=True)
+    country = db.Column(db.String(100), nullable=True)
+    
+    # Referral tracking
+    referred_by_id = db.Column(db.Integer, db.ForeignKey('contact_referrals.id', ondelete='CASCADE'), nullable=True)
+    is_primary = db.Column(db.Boolean, default=True)
+    
+    # Metadata
+    device_info = db.Column(db.Text, nullable=True)
+    ip_address = db.Column(db.String(50), nullable=True)
+    location_data = db.Column(JSON, nullable=True)
+    created_at = db.Column(db.DateTime, server_default=db.func.current_timestamp())
+    updated_at = db.Column(db.DateTime, server_default=db.func.current_timestamp(),
+                           onupdate=db.func.current_timestamp())
+    
+    # Relationships
+    referrals = db.relationship('ContactReferral', 
+                               backref=db.backref('referred_by', remote_side=[id]),
+                               lazy=True,
+                               cascade='all, delete-orphan')
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'first_name': self.first_name,
+            'last_name': self.last_name,
+            'email': self.email,
+            'full_phone': self.full_phone,
+            'whatsapp': self.whatsapp,
+            'preferred_contact': self.preferred_contact,
+            'type_of_institution': self.type_of_institution,
+            'institution_name': self.institution_name,
+            'title': self.title,
+            'physical_address': self.physical_address,
+            'country': self.country,
+            'referred_by_id': self.referred_by_id,
+            'is_primary': self.is_primary,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None
+        }
+
+    def __repr__(self):
+        return f'<ContactReferral {self.first_name} {self.last_name}>'
+
+
 """
 class EmailTemplate(db.Model):
     __tablename__ = 'email_templates'
@@ -3095,10 +3155,12 @@ def get_response(response_id):
 @app.route('/api/organization-types', methods=['GET'])
 def get_organization_types():
     org_types = OrganizationType.query.all()
-    return jsonify([{
-        'id': ot.id,
-        'type': ot.type
-    } for ot in org_types]), 200
+    return jsonify({
+        'organization_types': [{
+            'id': ot.id,
+            'type': ot.type
+        } for ot in org_types]
+    }), 200
 
 @app.route('/api/organization-types', methods=['POST'])
 def add_organization_type():
@@ -4499,9 +4561,22 @@ def get_all_users():
             user_data['display_role'] = user.role
             user_data['ui_role'] = user.role
         
+        # Include template_id from survey response if available
+        survey_response = SurveyResponse.query.filter_by(user_id=user.id).first()
+        user_data['template_id'] = survey_response.template_id if survey_response else None
+        
         # Include organization info if available
         if user.organization:
             user_data['organization_name'] = user.organization.name
+            user_data['organization'] = {
+                'id': user.organization.id,
+                'name': user.organization.name,
+                'website': user.organization.website,
+                'organization_type': {
+                    'id': user.organization.organization_type.id,
+                    'type': user.organization.organization_type.type
+                } if user.organization.organization_type else None
+            }
         
         # Include geo location info if available
         if user.geo_location:
@@ -4530,6 +4605,10 @@ def get_user(user_id):
     # Note: OrganizationUserRole has been removed
     # No roles will be included in the response
     
+    # Get the user's survey response to include template_id
+    survey_response = SurveyResponse.query.filter_by(user_id=user_id).first()
+    template_id = survey_response.template_id if survey_response else None
+    
     result = {
         'id': user.id,
         'username': user.username,
@@ -4537,7 +4616,8 @@ def get_user(user_id):
         'role': user.role,
         'firstname': user.firstname,
         'lastname': user.lastname,
-        'organization_id': user.organization_id
+        'organization_id': user.organization_id,
+        'template_id': template_id  # Include template_id from survey response
     }
     return jsonify(result)
 
@@ -4775,6 +4855,14 @@ def update_user(user_id):
     user = User.query.get_or_404(user_id)
     data = request.get_json()
     
+    # Debug logging
+    logger.info(f"=== UPDATE USER {user_id} DEBUG ===")
+    logger.info(f"Received data keys: {list(data.keys())}")
+    logger.info(f"template_id in data: {'template_id' in data}")
+    logger.info(f"template_id value: {data.get('template_id')}")
+    logger.info(f"Full data: {data}")
+    logger.info(f"================================")
+    
     # Track role validation
     role_changed = False
     requested_role = None
@@ -4800,6 +4888,80 @@ def update_user(user_id):
         user.phone = data['phone']
     if 'organization_id' in data:
         user.organization_id = data['organization_id']
+    
+    # Handle template_id update - update the user's survey response template
+    if 'template_id' in data and data['template_id']:
+        try:
+            template_id = data['template_id']
+            
+            # Verify template exists
+            template = SurveyTemplate.query.get(template_id)
+            if not template:
+                logger.warning(f"Template with ID {template_id} not found, skipping template update")
+            else:
+                # Find the most relevant existing survey response for this user
+                # Prefer a non-completed (pending/in_progress) response; otherwise fallback to latest by id
+                survey_response = None
+                try:
+                    # Try to find a pending or in_progress response, latest first
+                    survey_response = (
+                        SurveyResponse.query
+                        .filter(SurveyResponse.user_id == user_id, SurveyResponse.status.in_(['pending', 'in_progress']))
+                        .order_by(SurveyResponse.id.desc())
+                        .first()
+                    )
+                    if not survey_response:
+                        # Fallback to the most recent response by id
+                        survey_response = (
+                            SurveyResponse.query
+                            .filter_by(user_id=user_id)
+                            .order_by(SurveyResponse.id.desc())
+                            .first()
+                        )
+                except Exception as qerr:
+                    logger.error(f"Error querying survey responses for user {user_id}: {str(qerr)}")
+                    survey_response = None
+
+                if survey_response:
+                    # Update the chosen survey response with new template
+                    old_template_id = survey_response.template_id
+                    survey_response.template_id = template_id
+                    
+                    # Reset answers and status if template changed
+                    if old_template_id != template_id:
+                        survey_response.answers = {}
+                        survey_response.status = 'pending'
+                        logger.info(f"Updated survey response {survey_response.id} for user {user_id}: template {old_template_id} -> {template_id} (answers reset)")
+                    else:
+                        logger.info(f"Survey response {survey_response.id} template unchanged for user {user_id}")
+                else:
+                    # Create new survey response if none exists
+                    excluded_roles = ['admin', 'root', 'primary_contact', 'secondary_contact']
+                    current_role = data.get('role', user.role)
+                    validated_role = validate_user_role(current_role)
+                    
+                    if validated_role.lower() not in [role.lower() for role in excluded_roles]:
+                        current_date = datetime.now()
+                        start_date = current_date
+                        end_date = current_date + timedelta(days=15)
+                        response_survey_code = str(uuid.uuid4())
+                        
+                        survey_response = SurveyResponse(
+                            template_id=template_id,
+                            user_id=user_id,
+                            answers={},
+                            status='pending',
+                            survey_code=response_survey_code,
+                            start_date=start_date,
+                            end_date=end_date
+                        )
+                        db.session.add(survey_response)
+                        logger.info(f"Created new survey response for user {user_id} with template_id {template_id}")
+                    else:
+                        logger.info(f"Skipping survey response creation for user {user_id} with role '{validated_role}' - excluded role")
+        except Exception as e:
+            logger.error(f"Failed to update template for user {user_id}: {str(e)}")
+            # Don't fail the entire update if template update fails
     
     # Update geo location if provided
     if 'geo_location' in data and data['geo_location']:
@@ -5271,6 +5433,85 @@ def get_question_type_categories():
     """Get all unique question type categories"""
     categories = db.session.query(QuestionType.category).filter_by(is_active=True).distinct().all()
     return jsonify([cat[0] for cat in categories]), 200
+
+@app.route('/api/question-types/numeric', methods=['GET'])
+def get_numeric_question_types():
+    """Get all question types that are always numeric"""
+    # Based on QUESTION_TYPE_REFERENCE.md
+    # IDs 4, 7, 8, 10 are always numeric
+    numeric_type_ids = [4, 7, 8, 10]
+    
+    question_types = QuestionType.query.filter(
+        QuestionType.id.in_(numeric_type_ids),
+        QuestionType.is_active == True
+    ).all()
+    
+    return jsonify([{
+        'id': qt.id,
+        'name': qt.name,
+        'display_name': qt.display_name,
+        'category': qt.category,
+        'description': qt.description,
+        'is_always_numeric': True
+    } for qt in question_types]), 200
+
+@app.route('/api/question-types/non-numeric', methods=['GET'])
+def get_non_numeric_question_types():
+    """Get all question types that are always non-numeric"""
+    # Based on QUESTION_TYPE_REFERENCE.md
+    # IDs 3, 5, 6 are always non-numeric
+    non_numeric_type_ids = [3, 5, 6]
+    
+    question_types = QuestionType.query.filter(
+        QuestionType.id.in_(non_numeric_type_ids),
+        QuestionType.is_active == True
+    ).all()
+    
+    return jsonify([{
+        'id': qt.id,
+        'name': qt.name,
+        'display_name': qt.display_name,
+        'category': qt.category,
+        'description': qt.description,
+        'is_always_numeric': False
+    } for qt in question_types]), 200
+
+@app.route('/api/question-types/conditional', methods=['GET'])
+def get_conditional_question_types():
+    """Get all question types that may be numeric or non-numeric depending on content"""
+    # Based on QUESTION_TYPE_REFERENCE.md
+    # IDs 1, 2, 9 are conditional
+    conditional_type_ids = [1, 2, 9]
+    
+    question_types = QuestionType.query.filter(
+        QuestionType.id.in_(conditional_type_ids),
+        QuestionType.is_active == True
+    ).all()
+    
+    return jsonify([{
+        'id': qt.id,
+        'name': qt.name,
+        'display_name': qt.display_name,
+        'category': qt.category,
+        'description': qt.description,
+        'is_conditional': True
+    } for qt in question_types]), 200
+
+@app.route('/api/question-types/classify', methods=['POST'])
+def classify_question_endpoint():
+    """Classify a question as numeric or non-numeric"""
+    from text_analytics import classify_question_type
+    
+    data = request.get_json()
+    question_text = data.get('question_text', '')
+    question_metadata = data.get('metadata', {})
+    
+    if not question_text:
+        return jsonify({'error': 'question_text is required'}), 400
+    
+    classification = classify_question_type(question_text, question_metadata)
+    
+    return jsonify(classification), 200
 
 @app.route('/api/question-types/initialize', methods=['POST'])
 def initialize_question_types():
@@ -8853,6 +9094,217 @@ def get_survey_questions():
         logger.error(traceback.format_exc())
         return jsonify({'error': f'Failed to fetch survey questions: {str(e)}'}), 500
 
+@app.route('/api/survey-questions/with-types', methods=['GET', 'OPTIONS'])
+def get_survey_questions_with_types():
+    """Get survey questions with their question types for Custom Chart Builder"""
+    # Handle CORS preflight
+    if request.method == 'OPTIONS':
+        response = make_response('', 200)
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        response.headers['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+        return response
+    
+    try:
+        survey_type = request.args.get('survey_type', None)
+        template_id = request.args.get('template_id', None)
+        
+        logger.info(f"Fetching questions with types - survey_type: {survey_type}, template_id: {template_id}")
+        
+        # Build query for templates using proper joins through the relationships:
+        # SurveyTemplate -> SurveyTemplateVersion -> Organization -> OrganizationType
+        query = db.session.query(SurveyTemplate, OrganizationType)\
+            .join(SurveyTemplateVersion, SurveyTemplate.version_id == SurveyTemplateVersion.id)\
+            .join(Organization, SurveyTemplateVersion.organization_id == Organization.id)\
+            .join(OrganizationType, Organization.type == OrganizationType.id)
+        
+        if template_id:
+            query = query.filter(SurveyTemplate.id == template_id)
+        elif survey_type:
+            # Filter by organization type
+            # Normalize the survey_type parameter to match organization_types.type values
+            type_mapping = {
+                'church': 'church',
+                'institution': 'institution', 
+                'nonFormal': 'non_formal_organizations',
+                'non_formal': 'non_formal_organizations'
+            }
+            org_type_filter = type_mapping.get(survey_type.lower(), survey_type)
+            query = query.filter(OrganizationType.type == org_type_filter)
+        
+        templates_with_types = query.all()
+        
+        result = []
+        
+        for template, org_type in templates_with_types:
+            # Try to get questions from the Questions table first
+            questions_query = Question.query.filter_by(template_id=template.id).order_by(Question.order).all()
+            
+            template_questions = []
+            
+            # If questions table is empty, fallback to questions JSON field
+            if not questions_query and template.questions:
+                try:
+                    json_questions = json.loads(template.questions) if isinstance(template.questions, str) else template.questions
+                    
+                    for idx, q in enumerate(json_questions):
+                        # Map question type from JSON to question_type_id
+                        question_type_id = q.get('question_type_id') or q.get('type')
+                        
+                        # Try to get question type, default to short_text (id=1) if not found
+                        if isinstance(question_type_id, str):
+                            # Map string types to IDs
+                            type_mapping = {
+                                'short_text': 1, 'single_choice': 2, 'yes_no': 3,
+                                'likert5': 4, 'multi_select': 5, 'paragraph': 6,
+                                'numeric': 7, 'percentage': 8, 'flexible_input': 9,
+                                'year_matrix': 10
+                            }
+                            question_type_id = type_mapping.get(question_type_id.lower(), 1)
+                        
+                        question_type = QuestionType.query.get(question_type_id) if question_type_id else None
+                        if not question_type:
+                            question_type = QuestionType.query.get(1)  # Default to short_text
+                        
+                        # Determine if question is numeric based on question type
+                        is_numeric = False
+                        recommended_chart = 'bar'
+                        
+                        if question_type.id in [4, 7, 8, 10]:  # likert5, numeric, percentage, year_matrix
+                            is_numeric = True
+                            if question_type.id == 4:
+                                recommended_chart = 'diverging_stacked_bar'
+                            elif question_type.id == 7:
+                                recommended_chart = 'histogram'
+                            elif question_type.id == 8:
+                                recommended_chart = 'sunburst'
+                            elif question_type.id == 10:
+                                recommended_chart = 'heatmap'
+                        elif question_type.id in [3, 5, 6]:
+                            is_numeric = False
+                            if question_type.id == 3:
+                                recommended_chart = 'pie'
+                            elif question_type.id == 5:
+                                recommended_chart = 'horizontal_bar'
+                            elif question_type.id == 6:
+                                recommended_chart = 'word_cloud'
+                        elif question_type.id in [1, 2, 9]:
+                            if question_type.id == 1:
+                                recommended_chart = 'word_cloud'
+                            elif question_type.id == 2:
+                                recommended_chart = 'bar'
+                            elif question_type.id == 9:
+                                recommended_chart = 'table'
+                        
+                        # Use the actual order from the question data, not the loop index
+                        actual_order = q.get('order', idx)
+                        
+                        question_data = {
+                            'id': f"{template.id}_q_{actual_order}",  # Generate unique ID based on actual order
+                            'text': q.get('text') or q.get('question_text') or q.get('question') or 'Untitled Question',
+                            'section': q.get('section') or 'General',
+                            'order': actual_order,  # Use actual order from question data
+                            'is_required': q.get('is_required', False),
+                            'question_type_id': question_type.id,
+                            'question_type_name': question_type.name,
+                            'question_type_display': question_type.display_name,
+                            'question_type_category': question_type.category,
+                            'is_numeric': is_numeric,
+                            'recommended_chart': recommended_chart,
+                            'config': q.get('config') or {}
+                        }
+                        template_questions.append(question_data)
+                        
+                except Exception as json_error:
+                    logger.error(f"Error parsing questions_json for template {template.id}: {str(json_error)}")
+            else:
+                # Use questions from Questions table
+                for question in questions_query:
+                    # Get question type details
+                    question_type = QuestionType.query.get(question.question_type_id)
+                    
+                    if not question_type:
+                        logger.warning(f"Question {question.id} has invalid question_type_id: {question.question_type_id}")
+                        continue
+                    
+                    # Determine if question is numeric based on question type
+                    is_numeric = False
+                    recommended_chart = 'bar'
+                    
+                    # Based on QUESTION_TYPE_REFERENCE.md
+                    if question_type.id in [4, 7, 8, 10]:  # likert5, numeric, percentage, year_matrix
+                        is_numeric = True
+                        if question_type.id == 4:  # likert5
+                            recommended_chart = 'diverging_stacked_bar'
+                        elif question_type.id == 7:  # numeric
+                            recommended_chart = 'histogram'
+                        elif question_type.id == 8:  # percentage
+                            recommended_chart = 'sunburst'
+                        elif question_type.id == 10:  # year_matrix
+                            recommended_chart = 'heatmap'
+                    elif question_type.id in [3, 5, 6]:  # yes_no, multi_select, paragraph
+                        is_numeric = False
+                        if question_type.id == 3:  # yes_no
+                            recommended_chart = 'pie'
+                        elif question_type.id == 5:  # multi_select
+                            recommended_chart = 'horizontal_bar'
+                        elif question_type.id == 6:  # paragraph
+                            recommended_chart = 'word_cloud'
+                    elif question_type.id in [1, 2, 9]:  # short_text, single_choice, flexible_input
+                        # Conditional - need to check content
+                        if question_type.id == 1:  # short_text
+                            recommended_chart = 'word_cloud'
+                        elif question_type.id == 2:  # single_choice
+                            recommended_chart = 'bar'
+                        elif question_type.id == 9:  # flexible_input
+                            recommended_chart = 'table'
+                    
+                    question_data = {
+                        'id': question.id,
+                        'text': question.question_text,
+                        'section': question.section,
+                        'order': question.order,
+                        'is_required': question.is_required,
+                        'question_type_id': question.question_type_id,
+                        'question_type_name': question_type.name,
+                        'question_type_display': question_type.display_name,
+                        'question_type_category': question_type.category,
+                        'is_numeric': is_numeric,
+                        'recommended_chart': recommended_chart,
+                        'config': question.config or {}
+                    }
+                    
+                    template_questions.append(question_data)
+            
+            # Determine survey type from organization type
+            survey_type_name = 'general'
+            if org_type and org_type.type:
+                # Map organization_types.type to frontend survey type names
+                type_to_survey_type = {
+                    'church': 'church',
+                    'institution': 'institution',
+                    'non_formal_organizations': 'nonFormal'
+                }
+                survey_type_name = type_to_survey_type.get(org_type.type.lower(), 'general')
+            
+            template_data = {
+                'template_id': template.id,
+                'template_name': template.survey_code or f"Template {template.id}",
+                'survey_type': survey_type_name,
+                'organization_type': org_type.type if org_type else None,
+                'questions': template_questions,
+                'total_questions': len(template_questions)
+            }
+            
+            result.append(template_data)
+        
+        return jsonify(result), 200
+        
+    except Exception as e:
+        logger.error(f"Error fetching questions with types: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': f'Failed to fetch questions with types: {str(e)}'}), 500
+
 
 # User-specific survey response endpoints
 @app.route('/api/survey-responses/user/<int:user_id>', methods=['GET'])
@@ -9086,6 +9538,1227 @@ def get_similar_survey_comparison():
         logger.error(f"Error generating similar survey comparison: {str(e)}")
         logger.error(traceback.format_exc())
         return jsonify({'error': f'Failed to generate comparison: {str(e)}'}), 500
+
+
+@app.route('/api/survey-responses/template-info', methods=['GET', 'OPTIONS'])
+def get_template_info():
+    """
+    Diagnostic endpoint to show which templates are being used by surveys.
+    Helps debug why surveys aren't matching.
+    """
+    if request.method == 'OPTIONS':
+        response = make_response()
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+        response.headers.add('Access-Control-Allow-Methods', 'GET,OPTIONS')
+        return response
+    
+    try:
+        organization_type = request.args.get('organization_type', 'institution')
+        
+        # Map frontend org type to database org type
+        org_type_map = {
+            'church': 'church',
+            'institution': 'Institution',
+            'nonFormal': 'Non_formal_organizations'
+        }
+        db_org_type = org_type_map.get(organization_type, 'Institution')
+        
+        # Get all survey responses with template info
+        responses = db.session.query(SurveyResponse)\
+            .join(SurveyTemplate, SurveyResponse.template_id == SurveyTemplate.id)\
+            .join(User, SurveyResponse.user_id == User.id)\
+            .outerjoin(Organization, User.organization_id == Organization.id)\
+            .outerjoin(OrganizationType, Organization.type == OrganizationType.id)\
+            .filter(SurveyResponse.status == 'completed')\
+            .filter(OrganizationType.type == db_org_type)\
+            .all()
+        
+        # Group by template
+        template_groups = {}
+        for resp in responses:
+            template_id = resp.template_id
+            template = resp.template
+            
+            if template_id not in template_groups:
+                template_groups[template_id] = {
+                    'template_id': template_id,
+                    'template_code': template.survey_code if template else 'Unknown',
+                    'survey_responses': []
+                }
+            
+            template_groups[template_id]['survey_responses'].append({
+                'response_id': resp.id,
+                'user_id': resp.user_id,
+                'organization_name': resp.user.organization.name if resp.user and resp.user.organization else None,
+                'created_at': resp.created_at.isoformat() if resp.created_at else None
+            })
+        
+        # Convert to list and add counts
+        result = []
+        for template_id, group in template_groups.items():
+            group['response_count'] = len(group['survey_responses'])
+            result.append(group)
+        
+        # Sort by response count (descending)
+        result.sort(key=lambda x: x['response_count'], reverse=True)
+        
+        return jsonify({
+            'organization_type': organization_type,
+            'total_responses': len(responses),
+            'template_groups': result
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting template info: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/survey-responses/compare-by-template/debug/<int:response_id>', methods=['GET', 'OPTIONS'])
+def debug_template_questions(response_id):
+    """Debug endpoint to check template question structure"""
+    if request.method == 'OPTIONS':
+        response = make_response()
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+        response.headers.add('Access-Control-Allow-Methods', 'GET,OPTIONS')
+        return response
+    
+    try:
+        # Get the response and template
+        target_response = db.session.query(SurveyResponse)\
+            .join(SurveyTemplate, SurveyResponse.template_id == SurveyTemplate.id)\
+            .filter(SurveyResponse.id == response_id)\
+            .first()
+        
+        if not target_response:
+            return jsonify({'error': 'Response not found'}), 404
+        
+        target_template = target_response.template
+        if not target_template:
+            return jsonify({'error': 'Template not found'}), 404
+        
+        # Parse questions
+        target_questions = target_template.questions
+        if isinstance(target_questions, str):
+            target_questions = json.loads(target_questions)
+        
+        # Analyze structure
+        sample_question = target_questions[0] if target_questions else None
+        
+        return jsonify({
+            'response_id': response_id,
+            'template_id': target_template.id,
+            'template_code': target_template.survey_code,
+            'questions_count': len(target_questions),
+            'questions_type': type(target_questions).__name__,
+            'sample_question': sample_question,
+            'sample_question_keys': list(sample_question.keys()) if sample_question else [],
+            'all_questions': target_questions[:3]  # First 3 questions for inspection
+        }), 200
+    except Exception as e:
+        logger.error(f"Debug error: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/survey-responses/compare-by-template', methods=['POST', 'OPTIONS'])
+def compare_surveys_by_template():
+    """
+    Compare surveys based on matching questions from survey_templates.
+    Only compares surveys that share the same template (same questions).
+    Filters by organization type (church, institution, non-formal).
+    Includes qualitative text analysis using text_analytics module.
+    """
+    # Handle CORS preflight request
+    if request.method == 'OPTIONS':
+        response = make_response()
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+        response.headers.add('Access-Control-Allow-Methods', 'POST,OPTIONS')
+        return response
+    
+    try:
+        data = request.get_json()
+        target_response_id = data.get('target_response_id')
+        organization_type = data.get('organization_type')  # 'church', 'institution', 'nonFormal'
+        include_text_analysis = data.get('include_text_analysis', True)
+        
+        if not target_response_id:
+            return jsonify({'error': 'target_response_id is required'}), 400
+        
+        logger.info(f"Comparing surveys by template for response {target_response_id}, org type: {organization_type}, include_text_analysis: {include_text_analysis}")
+        
+        # Get the target response with its template
+        target_response = db.session.query(SurveyResponse)\
+            .join(SurveyTemplate, SurveyResponse.template_id == SurveyTemplate.id)\
+            .join(User, SurveyResponse.user_id == User.id)\
+            .outerjoin(Organization, User.organization_id == Organization.id)\
+            .outerjoin(OrganizationType, Organization.type == OrganizationType.id)\
+            .filter(SurveyResponse.id == target_response_id)\
+            .first()
+        
+        if not target_response:
+            return jsonify({'error': 'Target response not found'}), 404
+        
+        target_template = target_response.template
+        if not target_template:
+            return jsonify({'error': 'Target response has no template'}), 404
+        
+        logger.info(f"Target response uses template: {target_template.survey_code} (ID: {target_template.id})")
+        
+        # Parse target template questions
+        target_questions = target_template.questions
+        if isinstance(target_questions, str):
+            target_questions = json.loads(target_questions)
+        
+        # Handle empty or null questions
+        if not target_questions:
+            target_questions = []
+        
+        logger.info(f"Target template has {len(target_questions)} questions")
+        
+        # If template has no questions, return early with helpful error
+        if len(target_questions) == 0:
+            logger.warning(f"Template {target_template.survey_code} (ID: {target_template.id}) has no questions defined")
+            return jsonify({
+                'error': 'empty_template',
+                'message': f'This survey template ({target_template.survey_code}) has no questions defined. Please contact an administrator to fix this template.',
+                'target': {
+                    'id': target_response.id,
+                    'template_id': target_template.id,
+                    'template_code': target_template.survey_code,
+                    'template_questions_count': 0
+                },
+                'targetScores': {},
+                'averages': {},
+                'stats': {
+                    'total_comparisons': 0,
+                    'questions_compared': 0,
+                    'questions_with_data': 0,
+                    'higher_than_average': 0,
+                    'lower_than_average': 0,
+                    'average_difference': 0,
+                    'section_summary': 'No questions available'
+                },
+                'question_labels': {},
+                'question_details': {},
+                'question_meta': {}
+            }), 200
+        
+        # DEBUG: Log the structure of questions
+        if target_questions:
+            sample_q = target_questions[0]
+            logger.info(f"Sample question keys: {list(sample_q.keys())}")
+            logger.info(f"Sample question: {json.dumps(sample_q, indent=2)}")
+        
+        # Get all templates and find those with matching questions
+        all_templates = db.session.query(SurveyTemplate).all()
+        
+        # Build a map of template_id -> set of question identifiers
+        template_question_map = {}
+        
+        # Add target template
+        # Match based on question_text and question_type_id only (exclude question ID which is template-specific)
+        target_q_ids = set()
+        for q in target_questions:
+            # Create identifier without question ID for cross-template matching
+            q_id = str(q.get('question_text', '')) + '|' + str(q.get('question_type_id', ''))
+            target_q_ids.add(q_id)
+        
+        template_question_map[target_template.id] = {
+            'template': target_template,
+            'question_ids': target_q_ids,
+            'matching_count': len(target_q_ids)
+        }
+        
+        # Process all other templates
+        for template in all_templates:
+            if template.id == target_template.id:
+                continue
+            
+            # Parse template questions
+            template_questions = template.questions
+            if isinstance(template_questions, str):
+                template_questions = json.loads(template_questions)
+            
+            # Extract question identifiers (match by text and type only)
+            template_q_ids = set()
+            for q in template_questions:
+                # Create identifier without question ID for cross-template matching
+                q_id = str(q.get('question_text', '')) + '|' + str(q.get('question_type_id', ''))
+                template_q_ids.add(q_id)
+            
+            # Find matching questions (intersection)
+            matching_questions = target_q_ids & template_q_ids
+            
+            # Only include templates that have at least some matching questions
+            if matching_questions:
+                template_question_map[template.id] = {
+                    'template': template,
+                    'question_ids': template_q_ids,
+                    'matching_count': len(matching_questions)
+                }
+                logger.info(f"Template {template.survey_code} (ID: {template.id}) has {len(matching_questions)} matching questions out of {len(target_q_ids)}")
+            else:
+                logger.debug(f"Template {template.survey_code} (ID: {template.id}) has no matching questions")
+        
+        # Get all template IDs that have matching questions
+        matching_template_ids = list(template_question_map.keys())
+        
+        logger.info(f"Found {len(matching_template_ids)} templates with matching questions: {matching_template_ids}")
+        
+        # Get all responses with matching templates
+        query = db.session.query(SurveyResponse)\
+            .join(User, SurveyResponse.user_id == User.id)\
+            .outerjoin(Organization, User.organization_id == Organization.id)\
+            .outerjoin(OrganizationType, Organization.type == OrganizationType.id)\
+            .filter(SurveyResponse.template_id.in_(matching_template_ids))\
+            .filter(SurveyResponse.id != target_response_id)\
+            .filter(SurveyResponse.status == 'completed')
+        
+        # Filter by organization type if specified
+        if organization_type:
+            org_type_map = {
+                'church': 'church',
+                'institution': 'Institution',
+                'nonFormal': 'Non_formal_organizations'
+            }
+            db_org_type = org_type_map.get(organization_type)
+            if db_org_type:
+                query = query.filter(OrganizationType.type == db_org_type)
+                logger.info(f"Filtering by organization type: {db_org_type}")
+        
+        similar_responses = query.all()
+        logger.info(f"Found {len(similar_responses)} similar responses with matching questions")
+        
+        # Parse target response answers
+        target_answers = target_response.answers
+        if isinstance(target_answers, str):
+            target_answers = json.loads(target_answers)
+        
+        # Get template questions to know which fields to compare
+        template_questions = target_template.questions
+        if isinstance(template_questions, str):
+            template_questions = json.loads(template_questions)
+        
+        logger.info(f"Template has {len(template_questions)} questions")
+        
+        # Build a set of question IDs that we should compare (only matching questions)
+        # We need to map question identifiers back to question IDs
+        comparable_question_ids = set()
+        for q in target_questions:
+            comparable_question_ids.add(str(q.get('id', '')))
+        
+        logger.info(f"Will compare {len(comparable_question_ids)} questions: {comparable_question_ids}")
+        
+        # Build question meta: detect numeric questions using transformer-based classification
+        from text_analytics import classify_question_type
+        
+        question_meta = {}
+        for q in target_questions:
+            qid = str(q.get('id', ''))
+            if not qid:
+                continue
+            
+            qtext = q.get('question_text', '')
+            if not qtext:
+                question_meta[qid] = {'is_numeric': False, 'confidence': 1.0, 'reasoning': 'No question text', 'method': 'skip'}
+                continue
+            
+            # Prepare metadata for classifier
+            metadata = {
+                'question_type': q.get('question_type', ''),
+                'question_type_id': q.get('question_type_id', ''),
+                'input_type': q.get('input_type', ''),
+                'answer_type': q.get('answer_type', ''),
+                'options': q.get('options') or q.get('choices') or []
+            }
+            
+            # Use transformer-based classification (falls back to heuristics if transformer unavailable)
+            classification = classify_question_type(qtext, metadata)
+            question_meta[qid] = classification
+            
+            logger.info(f"Question {qid} ({qtext[:50]}...): {classification['method']} -> is_numeric={classification['is_numeric']} (confidence={classification['confidence']:.2%}, reason={classification['reasoning']})")
+        
+        # Extract numeric scores from target response (only for comparable questions and numeric questions)
+        target_scores = {}
+        for question_id, answer in target_answers.items():
+            # Only process questions that are in the comparable set
+            if str(question_id) not in comparable_question_ids:
+                continue
+            # Only process questions deemed numeric by template heuristics
+            if not question_meta.get(str(question_id), {}).get('is_numeric', False):
+                continue
+            # Try to convert to numeric
+            numeric_value = None
+            if isinstance(answer, (int, float)):
+                numeric_value = float(answer)
+            elif isinstance(answer, str):
+                # Try to parse numeric strings
+                try:
+                    numeric_value = float(answer)
+                except:
+                    # Try to extract number from range (e.g., "41-50")
+                    import re
+                    range_match = re.match(r'(\d+)\s*-\s*(\d+)', answer)
+                    if range_match:
+                        min_val = float(range_match.group(1))
+                        max_val = float(range_match.group(2))
+                        numeric_value = (min_val + max_val) / 2
+                    else:
+                        # Try to extract first number
+                        number_match = re.search(r'\d+', answer)
+                        if number_match:
+                            numeric_value = float(number_match.group())
+            
+            if numeric_value is not None:
+                target_scores[question_id] = numeric_value
+        
+        logger.info(f"Extracted {len(target_scores)} numeric scores from target response")
+        
+        # Extract scores from similar responses
+        all_scores = {}
+        for response in similar_responses:
+            response_answers = response.answers
+            if isinstance(response_answers, str):
+                response_answers = json.loads(response_answers)
+            
+            for question_id, answer in response_answers.items():
+                # Only process questions that are in the comparable set
+                if str(question_id) not in comparable_question_ids:
+                    continue
+                # Only process numeric questions per template metadata
+                if not question_meta.get(str(question_id), {}).get('is_numeric', False):
+                    continue
+                
+                # Try to convert to numeric
+                numeric_value = None
+                if isinstance(answer, (int, float)):
+                    numeric_value = float(answer)
+                elif isinstance(answer, str):
+                    try:
+                        numeric_value = float(answer)
+                    except:
+                        import re
+                        range_match = re.match(r'(\d+)\s*-\s*(\d+)', answer)
+                        if range_match:
+                            min_val = float(range_match.group(1))
+                            max_val = float(range_match.group(2))
+                            numeric_value = (min_val + max_val) / 2
+                        else:
+                            number_match = re.search(r'\d+', answer)
+                            if number_match:
+                                numeric_value = float(number_match.group())
+                
+                if numeric_value is not None:
+                    if question_id not in all_scores:
+                        all_scores[question_id] = []
+                    all_scores[question_id].append(numeric_value)
+
+        # Post-validate numeric meta: if marked numeric but no numeric values present anywhere, demote to non-numeric
+        for qid, meta in list(question_meta.items()):
+            if not meta.get('is_numeric', False):
+                continue
+            if qid not in target_scores and qid not in all_scores:
+                question_meta[qid]['is_numeric'] = False
+        
+        # Generate question labels using NLP
+        from text_analytics import generate_question_label, generate_section_summary
+        
+        question_labels = {}
+        question_details = {}
+        for q in target_questions:
+            q_id = str(q.get('id', ''))
+            q_text = q.get('question_text', '')
+            if q_id and q_text:
+                question_labels[q_id] = generate_question_label(q_text, max_words=3)
+                question_details[q_id] = {
+                    'label': question_labels[q_id],
+                    'full_text': q_text,
+                    'section': q.get('section', 'General')
+                }
+        
+        logger.info(f"Generated labels for {len(question_labels)} questions")
+        
+        # Generate section summary
+        section_summary = generate_section_summary(target_questions)
+        logger.info(f"Section summary: {section_summary}")
+        
+        # Calculate averages for each question
+        averages = {}
+        for question_id, scores in all_scores.items():
+            if scores:
+                averages[question_id] = sum(scores) / len(scores)
+        
+        logger.info(f"Calculated averages for {len(averages)} questions")
+        
+        # Calculate comparison statistics
+        stats = {
+            'total_comparisons': len(similar_responses),
+            'questions_compared': len(target_scores),
+            'questions_with_data': len(averages),
+            'higher_than_average': 0,
+            'lower_than_average': 0,
+            'average_difference': 0,
+            'section_summary': section_summary
+        }
+        
+        if target_scores and averages:
+            differences = []
+            for question_id in target_scores:
+                if question_id in averages:
+                    diff = target_scores[question_id] - averages[question_id]
+                    differences.append(diff)
+                    if diff > 0:
+                        stats['higher_than_average'] += 1
+                    elif diff < 0:
+                        stats['lower_than_average'] += 1
+            
+            if differences:
+                stats['average_difference'] = sum(differences) / len(differences)
+        
+        # Get target response info
+        target_info = {
+            'id': target_response.id,
+            'template_id': target_template.id,
+            'template_code': target_template.survey_code,
+            'template_questions_count': len(target_questions),
+            'user_id': target_response.user_id,
+            'organization_name': target_response.user.organization.name if target_response.user and target_response.user.organization else None,
+            'organization_type': target_response.user.organization.organization_type.type if target_response.user and target_response.user.organization and target_response.user.organization.organization_type else None
+        }
+        
+        # Add text analytics if requested
+        text_analytics_data = None
+        if include_text_analysis:
+            try:
+                logger.info("Running text analytics for target response and similar responses...")
+                
+                # Custom text extraction for your data structure
+                # Your answers are stored as JSON in survey_responses.answers
+                # Questions are stored in survey_templates.questions
+                
+                def extract_text_responses(response, template):
+                    """Extract text responses from a survey response"""
+                    text_responses = []
+                    
+                    # Parse answers
+                    answers = response.answers
+                    if isinstance(answers, str):
+                        answers = json.loads(answers)
+                    
+                    # Parse template questions
+                    questions = template.questions
+                    if isinstance(questions, str):
+                        questions = json.loads(questions)
+                    
+                    # Extract text answers (long strings, typically > 50 chars)
+                    for key, value in answers.items():
+                        if isinstance(value, str) and len(value.strip()) > 20:
+                            # Find the question text
+                            question_text = None
+                            for q in questions:
+                                if str(q.get('id')) == str(key) or q.get('name') == key:
+                                    question_text = q.get('question') or q.get('label') or q.get('text')
+                                    break
+                            
+                            text_responses.append({
+                                'question_key': key,
+                                'question_text': question_text,
+                                'answer': value.strip()
+                            })
+                    
+                    return text_responses
+                
+                # Extract text from target response
+                target_texts = extract_text_responses(target_response, target_template)
+                logger.info(f"Found {len(target_texts)} text responses in target survey")
+                
+                # Extract text from similar responses
+                comparison_texts = []
+                for resp in similar_responses:
+                    texts = extract_text_responses(resp, target_template)
+                    comparison_texts.extend(texts)
+                logger.info(f"Found {len(comparison_texts)} text responses in comparison group")
+                
+                if target_texts or comparison_texts:
+                    # Simple sentiment analysis using basic keyword matching
+                    def simple_sentiment(text):
+                        text_lower = text.lower()
+                        positive_words = ['good', 'great', 'excellent', 'yes', 'strong', 'effective', 'successful', 'positive', 'well', 'better', 'best', 'improved', 'growing']
+                        negative_words = ['no', 'not', 'poor', 'weak', 'limited', 'lack', 'insufficient', 'problem', 'issue', 'difficult', 'challenge', 'negative', 'worse', 'worst']
+                        
+                        pos_count = sum(1 for word in positive_words if word in text_lower)
+                        neg_count = sum(1 for word in negative_words if word in text_lower)
+                        
+                        if pos_count > neg_count:
+                            return 'positive'
+                        elif neg_count > pos_count:
+                            return 'negative'
+                        else:
+                            return 'neutral'
+                    
+                    # Analyze target responses
+                    target_sentiments = {'positive': 0, 'neutral': 0, 'negative': 0}
+                    for text_resp in target_texts:
+                        sentiment = simple_sentiment(text_resp['answer'])
+                        text_resp['sentiment'] = sentiment
+                        target_sentiments[sentiment] += 1
+                    
+                    # Analyze comparison responses
+                    comparison_sentiments = {'positive': 0, 'neutral': 0, 'negative': 0}
+                    for text_resp in comparison_texts:
+                        sentiment = simple_sentiment(text_resp['answer'])
+                        text_resp['sentiment'] = sentiment
+                        comparison_sentiments[sentiment] += 1
+                    
+                    text_analytics_data = {
+                        'target': {
+                            'total_text_responses': len(target_texts),
+                            'sentiment_distribution': target_sentiments,
+                            'responses': [{
+                                'question_id': t['question_key'],
+                                'question_text': t['question_text'],
+                                'answer': t['answer'],
+                                'sentiment': t['sentiment']
+                            } for t in target_texts]
+                        },
+                        'comparison_group': {
+                            'total_text_responses': len(comparison_texts),
+                            'sentiment_distribution': comparison_sentiments,
+                            'average_sentiment': max(comparison_sentiments, key=comparison_sentiments.get) if comparison_texts else None
+                        }
+                    }
+                    
+                    logger.info(f"Text analytics completed: {len(target_texts)} target responses, {len(comparison_texts)} comparison responses")
+                else:
+                    logger.info("No text responses found (all answers are short or numeric)")
+                    
+            except Exception as e:
+                logger.error(f"Error running text analytics: {str(e)}")
+                logger.error(traceback.format_exc())
+                # Don't fail the whole request if text analytics fails
+                text_analytics_data = {'error': str(e)}
+        
+        result = {
+            'target': target_info,
+            'targetScores': target_scores,
+            'averages': averages,
+            'stats': stats,
+            'comparison_count': len(similar_responses),
+            'template_questions_count': len(template_questions),
+            'question_labels': question_labels,
+            'question_details': question_details,
+            'question_meta': question_meta
+        }
+        
+        if text_analytics_data:
+            result['text_analytics'] = text_analytics_data
+        
+        return jsonify(result), 200
+        
+    except Exception as e:
+        logger.error(f"Error comparing surveys by template: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': f'Failed to compare surveys: {str(e)}'}), 500
+
+
+# ==================== Contact Referral API ====================
+
+@app.route('/api/contact-referrals', methods=['POST', 'OPTIONS'])
+def create_contact_referral():
+    """
+    Create a new contact referral submission.
+    Accepts primary contact and optional referrals.
+    """
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        data = request.json
+        logger.info(f"Received contact referral data: {data}")
+        
+        # Extract primary contact data
+        primary_data = data.get('primary_contact', {})
+        referrals_data = data.get('referrals', [])
+        
+        # Get metadata from request
+        ip_address = request.remote_addr
+        user_agent = request.headers.get('User-Agent', '')
+        
+        # Create primary contact
+        primary_contact = ContactReferral(
+            first_name=primary_data.get('firstName', ''),
+            last_name=primary_data.get('lastName', ''),
+            email=primary_data.get('email', ''),
+            full_phone=primary_data.get('fullPhone', ''),
+            whatsapp=primary_data.get('whatsapp', ''),
+            preferred_contact=primary_data.get('preferredContact', ''),
+            type_of_institution=primary_data.get('typeOfInstitution', ''),
+            institution_name=primary_data.get('institutionName', ''),
+            title=primary_data.get('title', ''),
+            physical_address=primary_data.get('physicalAddress', ''),
+            country=primary_data.get('country', ''),
+            is_primary=True,
+            device_info=user_agent,
+            ip_address=ip_address
+        )
+        
+        db.session.add(primary_contact)
+        db.session.flush()  # Get the primary contact ID
+        
+        # Create referral contacts
+        referral_contacts = []
+        for referral_data in referrals_data:
+            referral_email = referral_data.get('email', '').strip().lower()
+            
+            # Check if this email already exists in contact_referrals
+            existing_contact = None
+            if referral_email:
+                existing_contact = ContactReferral.query.filter(
+                    db.func.lower(ContactReferral.email) == referral_email
+                ).first()
+            
+            # Determine who should be the referrer
+            # If the email exists, the original person who entered it becomes the referrer
+            # Otherwise, the current primary contact is the referrer
+            referred_by_id = existing_contact.id if existing_contact else primary_contact.id
+            
+            referral = ContactReferral(
+                first_name=referral_data.get('firstName', ''),
+                last_name=referral_data.get('lastName', ''),
+                email=referral_data.get('email', ''),
+                full_phone=referral_data.get('fullPhone', ''),
+                whatsapp=referral_data.get('whatsapp', ''),
+                preferred_contact=referral_data.get('preferredContact', ''),
+                type_of_institution=referral_data.get('typeOfInstitution', ''),
+                institution_name=referral_data.get('institutionName', ''),
+                title=referral_data.get('title', ''),
+                physical_address=referral_data.get('physicalAddress', ''),
+                country=referral_data.get('country', ''),
+                is_primary=False,
+                referred_by_id=referred_by_id,  # Link to original person if duplicate
+                device_info=user_agent,
+                ip_address=ip_address
+            )
+            db.session.add(referral)
+            referral_contacts.append(referral)
+            
+            # Log if this is a duplicate referral
+            if existing_contact:
+                logger.info(f"Duplicate email detected: {referral_email}. Linking to original contact ID: {existing_contact.id}")
+        
+        db.session.commit()
+        
+        logger.info(f"Successfully created contact referral. Primary ID: {primary_contact.id}, Referrals: {len(referral_contacts)}")
+        
+        return jsonify({
+            'success': True,
+            'message': 'Contact referral submitted successfully',
+            'primary_contact_id': primary_contact.id,
+            'referral_count': len(referral_contacts)
+        }), 201
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error creating contact referral: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({
+            'success': False,
+            'error': 'Failed to submit contact referral',
+            'details': str(e)
+        }), 500
+
+
+@app.route('/api/contact-referrals', methods=['GET'])
+def get_contact_referrals():
+    """
+    Get all contact referrals (admin endpoint).
+    """
+    try:
+        # Get all primary contacts
+        primary_contacts = ContactReferral.query.filter_by(is_primary=True).all()
+        
+        result = []
+        for contact in primary_contacts:
+            contact_dict = contact.to_dict()
+            # Get referrals for this contact
+            referrals = ContactReferral.query.filter_by(referred_by_id=contact.id).all()
+            contact_dict['referrals'] = [ref.to_dict() for ref in referrals]
+            result.append(contact_dict)
+        
+        return jsonify({
+            'success': True,
+            'contacts': result,
+            'total': len(result)
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error fetching contact referrals: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': 'Failed to fetch contact referrals'
+        }), 500
+
+
+@app.route('/api/contact-referrals/<int:referral_id>/approve', methods=['POST'])
+def approve_contact_referral(referral_id):
+    """
+    Approve a contact referral and create user/organization if needed.
+    
+    Request body:
+    {
+        "create_organization": true/false,
+        "organization_id": <existing_org_id> (if create_organization is false),
+        "organization_name": "<name>" (if create_organization is true),
+        "organization_type_id": <type_id> (if create_organization is true),
+        "ui_role": "user/manager/head/etc",
+        "template_id": <template_id>,
+        "send_welcome_email": true/false
+    }
+    """
+    try:
+        data = request.get_json()
+        
+        # Get the contact referral
+        referral = ContactReferral.query.get(referral_id)
+        if not referral:
+            return jsonify({
+                'success': False,
+                'error': 'Contact referral not found'
+            }), 404
+        
+        # Check if user already exists with this email
+        existing_user = User.query.filter_by(email=referral.email).first()
+        if existing_user:
+            return jsonify({
+                'success': False,
+                'error': f'User with email {referral.email} already exists'
+            }), 400
+        
+        organization_id = None
+        
+        # Handle organization creation or selection
+        if data.get('create_organization', False):
+            # Create new organization
+            org_name = data.get('organization_name') or referral.institution_name
+            org_type_id = data.get('organization_type_id')
+            
+            if not org_name:
+                return jsonify({
+                    'success': False,
+                    'error': 'Organization name is required'
+                }), 400
+            
+            # Check if organization already exists
+            existing_org = Organization.query.filter_by(name=org_name).first()
+            if existing_org:
+                organization_id = existing_org.id
+                logger.info(f"Using existing organization: {org_name} (ID: {organization_id})")
+            else:
+                # Create geo_location if address provided
+                geo_location_id = None
+                if referral.physical_address or referral.country:
+                    geo_location = GeoLocation(
+                        country=referral.country,
+                        address_line1=referral.physical_address
+                    )
+                    db.session.add(geo_location)
+                    db.session.flush()
+                    geo_location_id = geo_location.id
+                
+                # Create new organization
+                new_org = Organization(
+                    name=org_name,
+                    type=org_type_id,
+                    address=geo_location_id
+                )
+                db.session.add(new_org)
+                db.session.flush()
+                organization_id = new_org.id
+                logger.info(f"Created new organization: {org_name} (ID: {organization_id})")
+        else:
+            # Use existing organization
+            organization_id = data.get('organization_id')
+            if not organization_id:
+                return jsonify({
+                    'success': False,
+                    'error': 'Organization ID is required when not creating new organization'
+                }), 400
+        
+        # Generate username from email
+        username = referral.email.split('@')[0]
+        base_username = username
+        counter = 1
+        while User.query.filter_by(username=username).first():
+            username = f"{base_username}{counter}"
+            counter += 1
+        
+        # Generate random password
+        import random
+        import string
+        password = ''.join(random.choices(string.ascii_letters + string.digits, k=12))
+        
+        # Create user
+        new_user = User(
+            username=username,
+            email=referral.email,
+            ui_role=data.get('ui_role', 'user'),
+            firstname=referral.first_name,
+            lastname=referral.last_name,
+            phone=referral.full_phone,
+            organization_id=organization_id
+        )
+        new_user.set_password(password)
+        db.session.add(new_user)
+        db.session.flush()
+        
+        # Create survey response if template provided
+        template_id = data.get('template_id')
+        if template_id:
+            survey_response = SurveyResponse(
+                user_id=new_user.id,
+                template_id=template_id,
+                status='pending'
+            )
+            db.session.add(survey_response)
+        
+        # Delete the contact referral after successful user creation
+        db.session.delete(referral)
+        
+        # Commit all changes
+        db.session.commit()
+        
+        # Send welcome email if requested
+        if data.get('send_welcome_email', False):
+            try:
+                # TODO: Implement email sending logic here
+                logger.info(f"Welcome email would be sent to {new_user.email}")
+            except Exception as email_error:
+                logger.error(f"Error sending welcome email: {str(email_error)}")
+        
+        return jsonify({
+            'success': True,
+            'message': 'Contact referral approved and user created successfully',
+            'user': {
+                'id': new_user.id,
+                'username': new_user.username,
+                'email': new_user.email,
+                'organization_id': organization_id
+            },
+            'password': password  # Return password for admin to share with user
+        }), 201
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error approving contact referral: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return jsonify({
+            'success': False,
+            'error': f'Failed to approve contact referral: {str(e)}'
+        }), 500
+
+
+@app.route('/api/contact-referrals/<int:referral_id>', methods=['PUT'])
+def update_contact_referral(referral_id):
+    """
+    Update an existing contact referral.
+    """
+    logger.info(f"=== UPDATE REQUEST RECEIVED for referral_id: {referral_id} ===")
+    try:
+        data = request.json
+        logger.info(f"Update data: {data}")
+        
+        referral = ContactReferral.query.get(referral_id)
+        if not referral:
+            return jsonify({
+                'success': False,
+                'error': 'Contact referral not found'
+            }), 404
+        
+        # Update fields if provided
+        if 'firstName' in data:
+            referral.first_name = data['firstName']
+        if 'lastName' in data:
+            referral.last_name = data['lastName']
+        if 'email' in data:
+            referral.email = data['email'].strip().lower()
+        if 'fullPhone' in data:
+            referral.full_phone = data['fullPhone']
+        if 'whatsapp' in data:
+            referral.whatsapp = data['whatsapp']
+        if 'preferredContact' in data:
+            referral.preferred_contact = data['preferredContact']
+        if 'typeOfInstitution' in data:
+            referral.type_of_institution = data['typeOfInstitution']
+        if 'institutionName' in data:
+            referral.institution_name = data['institutionName']
+        if 'title' in data:
+            referral.title = data['title']
+        if 'physicalAddress' in data:
+            referral.physical_address = data['physicalAddress']
+        if 'country' in data:
+            referral.country = data['country']
+        
+        db.session.commit()
+        logger.info(f"Successfully updated referral {referral_id}")
+        
+        return jsonify({
+            'success': True,
+            'message': 'Contact referral updated successfully',
+            'referral': referral.to_dict()
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error updating contact referral: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({
+            'success': False,
+            'error': 'Failed to update contact referral',
+            'details': str(e)
+        }), 500
+
+
+@app.route('/api/contact-referrals/<int:referral_id>/reject', methods=['DELETE'])
+def reject_contact_referral(referral_id):
+    """
+    Reject and delete a contact referral.
+    If it's a primary contact, also deletes all associated sub-referrals.
+    """
+    logger.info(f"=== REJECT REQUEST RECEIVED for referral_id: {referral_id} ===")
+    try:
+        referral = ContactReferral.query.get(referral_id)
+        logger.info(f"Referral found: {referral is not None}")
+        if not referral:
+            return jsonify({
+                'success': False,
+                'error': 'Contact referral not found'
+            }), 404
+        
+        # Store info for response
+        referral_info = {
+            'name': f"{referral.first_name} {referral.last_name}",
+            'email': referral.email
+        }
+        
+        # If this is a primary contact, delete all sub-referrals first
+        sub_referrals_count = 0
+        if referral.is_primary:
+            sub_referrals = ContactReferral.query.filter_by(
+                referred_by_id=referral.id,
+                is_primary=False
+            ).all()
+            
+            sub_referrals_count = len(sub_referrals)
+            
+            # Delete all sub-referrals
+            for sub_ref in sub_referrals:
+                db.session.delete(sub_ref)
+            
+            # Flush to ensure sub-referrals are deleted before parent
+            db.session.flush()
+            
+            logger.info(f"Deleted {sub_referrals_count} sub-referrals for contact {referral.id}")
+        
+        # Delete the primary referral
+        logger.info(f"About to delete primary referral {referral.id}")
+        db.session.delete(referral)
+        logger.info(f"Committing deletion...")
+        db.session.commit()
+        logger.info(f"Successfully deleted referral {referral.id}")
+        
+        message = f'Contact referral for {referral_info["name"]} has been rejected and deleted'
+        if sub_referrals_count > 0:
+            message += f' (including {sub_referrals_count} sub-referral(s))'
+        
+        return jsonify({
+            'success': True,
+            'message': message,
+            'deleted_referral': referral_info,
+            'sub_referrals_deleted': sub_referrals_count
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error rejecting contact referral: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({
+            'success': False,
+            'error': 'Failed to reject contact referral',
+            'details': str(e)
+        }), 500
+
+
+@app.route('/api/contact-referrals/check-email', methods=['POST', 'OPTIONS'])
+def check_email_exists():
+    """
+    Check if an email exists in contact referrals or users table.
+    
+    Request body:
+    {
+        "email": "<email>"
+    }
+    """
+    if request.method == 'OPTIONS':
+        return '', 200
+        
+    try:
+        data = request.get_json()
+        email = data.get('email', '').strip().lower()
+        
+        if not email:
+            return jsonify({
+                'success': False,
+                'error': 'Email is required'
+            }), 400
+        
+        # Check in contact referrals
+        contact_referral = ContactReferral.query.filter(
+            db.func.lower(ContactReferral.email) == email
+        ).first()
+        
+        # Check in users table
+        user = User.query.filter(
+            db.func.lower(User.email) == email
+        ).first()
+        
+        if contact_referral:
+            # Get referrer information if this contact was referred
+            referrer_info = None
+            if contact_referral.referred_by_id:
+                referrer = ContactReferral.query.get(contact_referral.referred_by_id)
+                if referrer:
+                    referrer_info = {
+                        'id': referrer.id,
+                        'name': f"{referrer.first_name} {referrer.last_name}",
+                        'email': referrer.email
+                    }
+            
+            # Get all sub-referrals for this contact
+            sub_referrals = ContactReferral.query.filter_by(
+                referred_by_id=contact_referral.id,
+                is_primary=False
+            ).all()
+            
+            sub_referrals_data = []
+            for sub_ref in sub_referrals:
+                sub_referrals_data.append({
+                    'firstName': sub_ref.first_name,
+                    'lastName': sub_ref.last_name,
+                    'email': sub_ref.email,
+                    'fullPhone': sub_ref.full_phone,
+                    'whatsapp': sub_ref.whatsapp,
+                    'preferredContact': sub_ref.preferred_contact,
+                    'typeOfInstitution': sub_ref.type_of_institution,
+                    'institutionName': sub_ref.institution_name,
+                    'title': sub_ref.title,
+                    'physicalAddress': sub_ref.physical_address,
+                    'country': sub_ref.country
+                })
+            
+            return jsonify({
+                'success': True,
+                'exists': True,
+                'source': 'contact_referral',
+                'original_contact_id': contact_referral.id,
+                'referrer': referrer_info,
+                'data': {
+                    'firstName': contact_referral.first_name,
+                    'lastName': contact_referral.last_name,
+                    'email': contact_referral.email,
+                    'fullPhone': contact_referral.full_phone,
+                    'whatsapp': contact_referral.whatsapp,
+                    'preferredContact': contact_referral.preferred_contact,
+                    'typeOfInstitution': contact_referral.type_of_institution,
+                    'institutionName': contact_referral.institution_name,
+                    'title': contact_referral.title,
+                    'physicalAddress': contact_referral.physical_address,
+                    'country': contact_referral.country
+                },
+                'subReferrals': sub_referrals_data
+            }), 200
+        elif user:
+            return jsonify({
+                'success': True,
+                'exists': True,
+                'source': 'user',
+                'data': {
+                    'firstName': user.firstname,
+                    'lastName': user.lastname,
+                    'email': user.email,
+                    'fullPhone': user.phone,
+                    'institutionName': user.organization.name if user.organization else '',
+                    'country': user.geo_location.country if user.geo_location else ''
+                }
+            }), 200
+        else:
+            return jsonify({
+                'success': True,
+                'exists': False,
+                'data': None
+            }), 200
+            
+    except Exception as e:
+        logger.error(f"Error checking email: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({
+            'success': False,
+            'error': 'Failed to check email'
+        }), 500
+
+
+@app.route('/api/contact-referrals/check-organization', methods=['POST'])
+def check_organization_exists():
+    """
+    Check if an organization exists by name.
+    
+    Request body:
+    {
+        "organization_name": "<name>"
+    }
+    """
+    try:
+        data = request.get_json()
+        org_name = data.get('organization_name', '').strip()
+        
+        if not org_name:
+            return jsonify({
+                'success': False,
+                'error': 'Organization name is required'
+            }), 400
+        
+        # Search for organization (case-insensitive)
+        organization = Organization.query.filter(
+            db.func.lower(Organization.name) == org_name.lower()
+        ).first()
+        
+        if organization:
+            return jsonify({
+                'success': True,
+                'exists': True,
+                'organization': {
+                    'id': organization.id,
+                    'name': organization.name,
+                    'type_id': organization.type
+                }
+            }), 200
+        else:
+            return jsonify({
+                'success': True,
+                'exists': False,
+                'organization': None
+            }), 200
+            
+    except Exception as e:
+        logger.error(f"Error checking organization: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': 'Failed to check organization'
+        }), 500
 
 
 if __name__ == '__main__':
