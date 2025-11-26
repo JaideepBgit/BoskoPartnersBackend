@@ -243,8 +243,331 @@ def create_analysis_table(db, db_session, survey_response_model, question_model)
         "cluster",
     ]].to_sql("text_answer_analytics", db.engine, if_exists="append", index=False)
 
+def generate_question_label(question_text: str, max_words: int = 3) -> str:
+    """
+    Generate a concise 1-3 word label for a question using NLP.
+    
+    Args:
+        question_text: The full question text
+        max_words: Maximum number of words in the label (default: 3)
+    
+    Returns:
+        A concise label (e.g., "Age Group", "Leadership Training", "Budget Status")
+    """
+    import re
+    from nltk.corpus import stopwords
+    
+    # Ensure stopwords are downloaded
+    try:
+        stop_words = set(stopwords.words('english'))
+    except:
+        nltk_download('stopwords', quiet=True)
+        stop_words = set(stopwords.words('english'))
+    
+    # Clean the question text
+    text = question_text.lower()
+    
+    # Remove question marks and extra punctuation
+    text = re.sub(r'[?!.,;:]', '', text)
+    
+    # Common question starters to remove
+    question_starters = [
+        'what is', 'what are', 'what kind of', 'what extent',
+        'how many', 'how much', 'how long',
+        'do you', 'does your', 'did you',
+        'are you', 'is your', 'is this',
+        'have you', 'has your',
+        'when was', 'when did',
+        'where is', 'where are',
+        'which', 'who',
+        'please', 'kindly'
+    ]
+    
+    for starter in question_starters:
+        if text.startswith(starter):
+            text = text[len(starter):].strip()
+    
+    # Split into words
+    words = text.split()
+    
+    # Remove stopwords but keep important ones
+    important_words = []
+    keep_words = {'years', 'year', 'many', 'much', 'long', 'old', 'new'}
+    
+    for word in words:
+        if word not in stop_words or word in keep_words:
+            # Skip very short words unless they're important
+            if len(word) > 2 or word in keep_words:
+                important_words.append(word)
+    
+    # Take first max_words important words
+    label_words = important_words[:max_words]
+    
+    # Capitalize each word
+    label = ' '.join(word.capitalize() for word in label_words)
+    
+    # Handle empty labels
+    if not label:
+        # Fallback: take first few words of original question
+        fallback_words = question_text.split()[:max_words]
+        label = ' '.join(word.capitalize() for word in fallback_words)
+    
+    return label
+
+
+def generate_section_summary(questions: List[Dict]) -> str:
+    """
+    Generate a summary label for a section based on its questions using sentence embeddings.
+    
+    Args:
+        questions: List of question dictionaries with 'question_text' field
+    
+    Returns:
+        A summary label for the section (e.g., "Leadership & Training", "Institutional Resources")
+    """
+    if not questions:
+        return "General Questions"
+    
+    # Extract all question texts
+    question_texts = [q.get('question_text', '') for q in questions if q.get('question_text')]
+    
+    if not question_texts:
+        return "General Questions"
+    
+    # Common themes to detect
+    themes = {
+        'Leadership': ['leader', 'president', 'board', 'manage', 'director', 'head'],
+        'Training': ['training', 'education', 'degree', 'qualification', 'academic', 'formal'],
+        'Resources': ['resource', 'support', 'available', 'help', 'software', 'system'],
+        'Faculty': ['faculty', 'staff', 'teacher', 'professor', 'instructor'],
+        'Students': ['student', 'enrollment', 'housing', 'learner'],
+        'Infrastructure': ['electricity', 'water', 'solar', 'building', 'campus', 'facility'],
+        'Financial': ['budget', 'dollar', 'funding', 'financial', 'cost', 'money'],
+        'Personal': ['age', 'name', 'email', 'address', 'personal', 'contact'],
+        'Institutional': ['institution', 'school', 'university', 'college', 'seminary'],
+        'Accreditation': ['accredit', 'certification', 'quality', 'standard']
+    }
+    
+    # Count theme occurrences
+    theme_scores = {theme: 0 for theme in themes}
+    
+    combined_text = ' '.join(question_texts).lower()
+    
+    for theme, keywords in themes.items():
+        for keyword in keywords:
+            theme_scores[theme] += combined_text.count(keyword)
+    
+    # Get top 2 themes
+    sorted_themes = sorted(theme_scores.items(), key=lambda x: x[1], reverse=True)
+    top_themes = [theme for theme, score in sorted_themes[:2] if score > 0]
+    
+    if len(top_themes) >= 2:
+        return f"{top_themes[0]} & {top_themes[1]}"
+    elif len(top_themes) == 1:
+        return top_themes[0]
+    else:
+        # Fallback: use first question's label
+        return generate_question_label(question_texts[0], max_words=2)
+
+
+# ---------------------------------------------------------------------------
+# Question Classification (Database-Driven)
+# ---------------------------------------------------------------------------
+
+def classify_question_type(question_text: str, question_metadata: dict = None) -> dict:
+    """
+    Classify a question as numeric or non-numeric using question_type_id from database.
+    Falls back to heuristic rules if question_type_id is not available.
+    
+    Args:
+        question_text: The full question text
+        question_metadata: Optional metadata including 'question_type_id'
+    
+    Returns:
+        Dict with is_numeric, confidence, reasoning, method
+    """
+    # Try database-driven classification first
+    if question_metadata and 'question_type_id' in question_metadata:
+        result = _classify_by_question_type_id(question_metadata['question_type_id'])
+        if result:
+            return result
+    
+    # Fallback to heuristic classification
+    return _classify_question_heuristic(question_text, question_metadata)
+
+
+def _classify_by_question_type_id(question_type_id) -> dict:
+    """
+    Classify question as numeric/non-numeric based on question_type_id.
+    
+    Based on QUESTION_TYPE_REFERENCE.md:
+    - IDs 1, 2, 9: Conditional (depends on content)
+    - IDs 3, 5, 6: Non-numeric (yes/no, multi-select, paragraph)
+    - IDs 4, 7, 8, 10: Numeric (likert, numeric, percentage, year_matrix)
+    
+    Args:
+        question_type_id: The question type ID from question_types table
+    
+    Returns:
+        Dict with classification or None if type is conditional
+    """
+    try:
+        qtype_id = int(question_type_id)
+    except (ValueError, TypeError):
+        return None
+    
+    # Explicit numeric types
+    if qtype_id == 4:  # likert5
+        return {
+            'is_numeric': True,
+            'confidence': 0.95,
+            'reasoning': 'Five-Point Likert Scale (ordinal 1-5)',
+            'method': 'question_type_id',
+            'question_type_id': qtype_id
+        }
+    
+    if qtype_id == 7:  # numeric
+        return {
+            'is_numeric': True,
+            'confidence': 0.98,
+            'reasoning': 'Numeric Entry type',
+            'method': 'question_type_id',
+            'question_type_id': qtype_id
+        }
+    
+    if qtype_id == 8:  # percentage
+        return {
+            'is_numeric': True,
+            'confidence': 0.98,
+            'reasoning': 'Percentage Allocation type',
+            'method': 'question_type_id',
+            'question_type_id': qtype_id
+        }
+    
+    if qtype_id == 10:  # year_matrix
+        return {
+            'is_numeric': True,
+            'confidence': 0.98,
+            'reasoning': 'Year Matrix type (temporal numeric data)',
+            'method': 'question_type_id',
+            'question_type_id': qtype_id
+        }
+    
+    # Explicit non-numeric types
+    if qtype_id == 3:  # yes_no
+        return {
+            'is_numeric': False,
+            'confidence': 0.95,
+            'reasoning': 'Yes/No type (boolean/categorical)',
+            'method': 'question_type_id',
+            'question_type_id': qtype_id
+        }
+    
+    if qtype_id == 5:  # multi_select
+        return {
+            'is_numeric': False,
+            'confidence': 0.95,
+            'reasoning': 'Multiple Select type (categorical)',
+            'method': 'question_type_id',
+            'question_type_id': qtype_id
+        }
+    
+    if qtype_id == 6:  # paragraph
+        return {
+            'is_numeric': False,
+            'confidence': 0.98,
+            'reasoning': 'Paragraph Text type (long text)',
+            'method': 'question_type_id',
+            'question_type_id': qtype_id
+        }
+    
+    # Conditional types (1=short_text, 2=single_choice, 9=flexible_input)
+    # Return None to trigger heuristic analysis
+    if qtype_id in [1, 2, 9]:
+        return None
+    
+    # Unknown type ID
+    return None
+
+
+def _classify_question_heuristic(question_text: str, question_metadata: dict = None) -> dict:
+    """
+    Fallback heuristic-based classification when transformer is unavailable.
+    
+    Args:
+        question_text: The full question text
+        question_metadata: Optional metadata
+    
+    Returns:
+        Dict with is_numeric, confidence, reasoning, method
+    """
+    import re
+    
+    qtext = question_text.lower()
+    answer_type = ''
+    input_type = ''
+    options = []
+    
+    if question_metadata:
+        answer_type = str(question_metadata.get('answer_type', '')).lower()
+        input_type = str(question_metadata.get('input_type', '')).lower()
+        options = question_metadata.get('options', [])
+        if isinstance(options, str):
+            try:
+                import json
+                options = json.loads(options)
+            except:
+                options = []
+    
+    # EXPLICIT NON-NUMERIC
+    if 'textarea' in answer_type or 'textarea' in input_type:
+        return {'is_numeric': False, 'confidence': 0.95, 'reasoning': 'Textarea field', 'method': 'heuristic'}
+    
+    if 'boolean' in input_type or 'bool' in answer_type or 'checkbox' in input_type:
+        return {'is_numeric': False, 'confidence': 0.95, 'reasoning': 'Boolean/checkbox', 'method': 'heuristic'}
+    
+    if 'yes/no' in qtext or re.search(r'\byes\b.*\bno\b|\bno\b.*\byes\b', qtext):
+        return {'is_numeric': False, 'confidence': 0.90, 'reasoning': 'Yes/No question', 'method': 'heuristic'}
+    
+    if options:
+        lowered = [str(o).lower().strip() for o in options]
+        if any(o in ['yes', 'no', 'true', 'false'] for o in lowered):
+            return {'is_numeric': False, 'confidence': 0.90, 'reasoning': 'Yes/No options', 'method': 'heuristic'}
+        
+        # Check for scale terms
+        scale_terms = ['strongly agree', 'agree', 'neutral', 'disagree', 'strongly disagree',
+                      'very satisfied', 'satisfied', 'dissatisfied', 'very dissatisfied',
+                      'excellent', 'good', 'fair', 'poor', 'very poor',
+                      'always', 'often', 'sometimes', 'rarely', 'never']
+        is_scale = any(any(term in opt for term in scale_terms) for opt in lowered)
+        if is_scale:
+            return {'is_numeric': True, 'confidence': 0.85, 'reasoning': 'Likert scale options', 'method': 'heuristic'}
+        
+        is_all_numeric = all(re.fullmatch(r"-?\d+(\.\d+)?", opt) for opt in lowered if opt)
+        if is_all_numeric:
+            return {'is_numeric': True, 'confidence': 0.95, 'reasoning': 'Pure numeric options', 'method': 'heuristic'}
+    
+    # POSITIVE SIGNALS
+    numeric_tokens = ['number', 'numeric', 'integer', 'float', 'double', 'scale', 'rating', 
+                     'range', 'slider', 'percent', 'percentage', 'age', 'count', 'amount',
+                     'quantity', 'years', 'months', 'days', 'hours', 'how many', 'how much']
+    token_str = ' '.join([answer_type, input_type, qtext])
+    if any(tok in token_str for tok in numeric_tokens):
+        return {'is_numeric': True, 'confidence': 0.75, 'reasoning': 'Contains numeric keywords', 'method': 'heuristic'}
+    
+    # Short text field - tentative
+    if 'text' in answer_type and 'textarea' not in answer_type:
+        return {'is_numeric': True, 'confidence': 0.50, 'reasoning': 'Short text field (tentative)', 'method': 'heuristic'}
+    
+    # Default
+    return {'is_numeric': False, 'confidence': 0.60, 'reasoning': 'No numeric indicators', 'method': 'heuristic'}
+
+
 __all__ = [
     "fetch_open_ended_answers",
     "run_full_analysis",
     "get_analysis",
+    "generate_question_label",
+    "generate_section_summary",
+    "classify_question_type",
 ]

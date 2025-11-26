@@ -6,7 +6,8 @@ from sqlalchemy import text, or_
 from sqlalchemy import UniqueConstraint
 from sqlalchemy.orm import joinedload
 import json 
-from datetime import datetime
+from datetime import datetime, timedelta
+import secrets
 import logging
 import traceback
 
@@ -31,6 +32,8 @@ import requests
 from geopy.geocoders import Nominatim
 from geopy.exc import GeocoderTimedOut, GeocoderServiceError
 import time as time_module
+import secrets
+from datetime import timedelta
 
 # Ensure .env values override any existing environment variables and are resolved
 # relative to this file's directory, so local edits take effect on reloads.
@@ -859,7 +862,7 @@ Survey Platform: www.saurara.org | Support: support@saurara.org"""
             'error': f"SMTP survey assignment email sending failed: {str(e)}"
         }
 
-def send_reminder_email_smtp(to_email, username, survey_code, firstname=None, organization_name=None, days_remaining=None):
+def send_reminder_email_smtp(to_email, username, survey_code, firstname=None, organization_name=None, days_remaining=None, password=None):
     """Send reminder email using SMTP"""
     try:
         # Get SMTP credentials from environment
@@ -877,6 +880,7 @@ def send_reminder_email_smtp(to_email, username, survey_code, firstname=None, or
         greeting = f"Dear {firstname}" if firstname else f"Dear {username}"
         org_text = f" from {organization_name}" if organization_name else ""
         deadline_text = f" You have {days_remaining} days remaining to complete it." if days_remaining else ""
+        password_text = f"\n• Password: {password}" if password else ""
         
         body_text = f"""{greeting},
 
@@ -885,9 +889,16 @@ We hope this message finds you well!
 This is a friendly reminder that you have a pending survey{org_text} on the Saurara Platform that requires your attention.{deadline_text}
 
 Your Survey Details:
-• Username: {username}
+• Username: {username}{password_text}
 • Survey Code: {survey_code}
 • Survey Link: www.saurara.org
+
+🔑 NEED YOUR PASSWORD?
+Your login password was sent in your WELCOME EMAIL when your account was created. 
+Please search your email inbox for "Welcome to Saurara Platform" to find your credentials.
+
+If you cannot find your welcome email or need to reset your password, please use the 
+"Forgot Password" link on the login page or contact support at support@saurara.org
 
 Why Your Response Matters:
 Your input is invaluable in helping us understand and improve educational and community initiatives. Every response contributes to meaningful research that can make a real difference in communities like yours.
@@ -953,9 +964,22 @@ Visit: www.saurara.org | Email: support@saurara.org"""
                         <h3 style="color: #2c5530; margin-top: 0;">📊 Your Survey Details</h3>
                         <ul style="list-style-type: none; padding-left: 0;">
                             <li><strong>👤 Username:</strong> {username}</li>
+                            {'<li><strong>🔐 Password:</strong> <code style="background: #f0f0f0; padding: 2px 6px; border-radius: 4px; font-family: monospace;">' + password + '</code></li>' if password else ''}
                             <li><strong>🔑 Survey Code:</strong> <code style="background: #f0f0f0; padding: 2px 6px; border-radius: 4px; font-family: monospace;">{survey_code}</code></li>
                             <li><strong>🌐 Platform:</strong> <a href="http://www.saurara.org" style="color: #667eea;">www.saurara.org</a></li>
                         </ul>
+                    </div>
+                    
+                    <div style="background: #fff3cd; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #ffc107;">
+                        <h3 style="color: #f57c00; margin-top: 0;">🔑 Need Your Password?</h3>
+                        <p style="margin-bottom: 0;">
+                            Your login password was sent in your <strong>Welcome Email</strong> when your account was created. 
+                            Please search your email inbox for "Welcome to Saurara Platform" to find your credentials.
+                            <br><br>
+                            If you cannot find your welcome email or need to reset your password, please use the 
+                            <strong>"Forgot Password"</strong> link on the login page or contact support at 
+                            <a href="mailto:support@saurara.org" style="color: #667eea;">support@saurara.org</a>
+                        </p>
                     </div>
                     
                     <div style="text-align: center; margin: 30px 0;">
@@ -1037,7 +1061,7 @@ Visit: www.saurara.org | Email: support@saurara.org"""
             'error': f"SMTP email sending failed: {str(e)}"
         }
 
-def send_reminder_email(to_email, username, survey_code, firstname=None, organization_name=None, days_remaining=None, organization_id=None, template_id=None):
+def send_reminder_email(to_email, username, survey_code, firstname=None, organization_name=None, days_remaining=None, organization_id=None, template_id=None, password=None):
     """Send reminder email to user using database template (tries SES API first, falls back to SMTP)"""
     try:
         # Try to get reminder email template from database
@@ -1082,13 +1106,16 @@ def send_reminder_email(to_email, username, survey_code, firstname=None, organiz
             greeting = f"Dear {firstname}" if firstname else f"Dear {username}"
             org_text = f" from {organization_name}" if organization_name else ""
             deadline_text = f" You have {days_remaining} days remaining to complete it." if days_remaining else ""
+            password_text = f"\n• Password: {password}" if password else ""
             
             template_vars = {
                 'greeting': greeting,
                 'username': username,
+                'password': password or '',
                 'survey_code': survey_code,
                 'org_text': org_text,
-                'deadline_text': deadline_text
+                'deadline_text': deadline_text,
+                'password_text': password_text
             }
             
             # Render template content
@@ -1110,15 +1137,27 @@ We hope this message finds you well!
 
 This is a friendly reminder that you have a pending survey{org_text} on the Saurara Platform that requires your attention.{deadline_text}
 
+Your Survey Details:
+• Username: {username}
+• Survey Code: {survey_code}
+• Survey Link: www.saurara.org
+
+🔑 NEED YOUR PASSWORD?
+Your login password was sent in your WELCOME EMAIL when your account was created. 
+Please search your email inbox for "Welcome to Saurara Platform" to find your credentials.
+
+If you cannot find your welcome email or need to reset your password, please use the 
+"Forgot Password" link on the login page or contact support at support@saurara.org
+
 Best regards,
 The Saurara Research Team"""
 
-            body_html = f"""<html><body><h1>Survey Reminder</h1><p>{greeting},</p><p>This is a friendly reminder that you have a pending survey on the Saurara Platform.</p><p><strong>Survey Code:</strong> {survey_code}</p><p>Visit: www.saurara.org</p><p>Best regards,<br>The Saurara Research Team</p></body></html>"""
+            body_html = f"""<html><body><h1>Survey Reminder</h1><p>{greeting},</p><p>This is a friendly reminder that you have a pending survey on the Saurara Platform.</p><p><strong>Survey Code:</strong> {survey_code}</p><div style="background: #fff3cd; padding: 15px; margin: 20px 0; border-left: 4px solid #ffc107;"><h3>🔑 Need Your Password?</h3><p>Your login password was sent in your <strong>Welcome Email</strong> when your account was created. Please search your email inbox for "Welcome to Saurara Platform" to find your credentials.</p><p>If you cannot find your welcome email or need to reset your password, please use the "Forgot Password" link on the login page or contact support at support@saurara.org</p></div><p>Visit: www.saurara.org</p><p>Best regards,<br>The Saurara Research Team</p></body></html>"""
         
         ses_client = get_ses_client()
         if not ses_client:
             logger.warning("SES API client failed, trying SMTP method...")
-            return send_reminder_email_smtp(to_email, username, survey_code, firstname, organization_name, days_remaining)
+            return send_reminder_email_smtp(to_email, username, survey_code, firstname, organization_name, days_remaining, password)
         
         # Get verified sender email from environment
         source_email = os.getenv('SES_VERIFIED_EMAIL', 'noreply@saurara.org')
@@ -1160,11 +1199,11 @@ The Saurara Research Team"""
         error_message = e.response['Error']['Message']
         logger.error(f"[EMAIL] SES API ClientError: {error_code} - {error_message}")
         logger.warning("[EMAIL] SES API failed, trying SMTP method as fallback...")
-        return send_welcome_email_smtp(to_email, username, password, firstname, survey_code)
+        return send_reminder_email_smtp(to_email, username, survey_code, firstname, organization_name, days_remaining, password)
     except Exception as e:
-        logger.error(f"[EMAIL] Error sending welcome email via SES API: {str(e)}")
+        logger.error(f"[EMAIL] Error sending reminder email via SES API: {str(e)}")
         logger.warning("[EMAIL] SES API failed, trying SMTP method as fallback...")
-        return send_welcome_email_smtp(to_email, username, password, firstname, survey_code)
+        return send_reminder_email_smtp(to_email, username, survey_code, firstname, organization_name, days_remaining, password)
 
 # Geocoding utility functions
 def geocode_address(address_components):
@@ -6356,6 +6395,493 @@ def test_email_config():
             'message': f'Email configuration test failed: {str(e)}'
         }), 500
 
+
+# ============================================================================
+# PASSWORD RESET FUNCTIONS AND ROUTES
+# ============================================================================
+
+def send_password_reset_email(to_email, username, reset_token, firstname=None):
+    """Send password reset email with reset link"""
+    try:
+        ses_client = get_ses_client()
+        if not ses_client:
+            logger.warning("SES API client failed, trying SMTP method...")
+            return send_password_reset_email_smtp(to_email, username, reset_token, firstname)
+        
+        # Create reset link
+        reset_link = f"http://www.saurara.org/reset-password?token={reset_token}"
+        
+        # Email content
+        subject = "🔐 Reset Your Saurara Password"
+        greeting = f"Dear {firstname}" if firstname else f"Dear {username}"
+        
+        body_text = f"""{greeting},
+
+We received a request to reset your password for your Saurara account.
+
+🔑 Reset Your Password
+
+Click the link below to reset your password. This link will expire in 1 hour for security reasons.
+
+{reset_link}
+
+⚠️ Security Notice
+
+If you did not request a password reset, please ignore this email and your password will remain unchanged. Your account is secure and no changes have been made.
+
+For security reasons, this password reset link will expire in 1 hour.
+
+If you continue to have problems, please contact our support team at support@saurara.org
+
+Best regards,
+The Saurara Team
+
+---
+www.saurara.org | support@saurara.org"""
+
+        body_html = f"""
+        <html>
+        <head>
+            <style>
+                body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; line-height: 1.6; color: #333; margin: 0; padding: 0; }}
+                .container {{ max-width: 600px; margin: 0 auto; padding: 20px; background: #f8fafc; }}
+                .header {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px 20px; text-align: center; border-radius: 10px 10px 0 0; }}
+                .content {{ background: #ffffff; padding: 30px; border: 1px solid #e0e0e0; }}
+                .footer {{ background: #f8f9fa; padding: 20px; border-radius: 0 0 10px 10px; border: 1px solid #e0e0e0; border-top: none; text-align: center; }}
+                .reset-box {{ background: #fff3cd; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #ffc107; }}
+                .button {{ display: inline-block; background: #667eea; color: white; padding: 15px 30px; text-decoration: none; border-radius: 6px; font-weight: bold; margin: 15px 0; }}
+                .security-note {{ background: #f8d7da; padding: 15px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #dc3545; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <h1 style="margin: 0; font-size: 28px;">🔐 Password Reset Request</h1>
+                    <p style="margin: 10px 0 0 0; font-size: 16px; opacity: 0.9;">Saurara Platform</p>
+                </div>
+                
+                <div class="content">
+                    <p style="font-size: 18px; margin-bottom: 20px;">{greeting},</p>
+                    
+                    <p>We received a request to reset your password for your Saurara account.</p>
+                    
+                    <div class="reset-box">
+                        <h3 style="margin-top: 0; color: #856404;">🔑 Reset Your Password</h3>
+                        <p>Click the button below to reset your password. This link will expire in <strong>1 hour</strong> for security reasons.</p>
+                        <div style="text-align: center; margin: 20px 0;">
+                            <a href="{reset_link}" class="button" style="color: white; text-decoration: none;">Reset Password</a>
+                        </div>
+                        <p style="margin-bottom: 0; font-size: 14px;">Or copy and paste this link into your browser:<br>
+                        <a href="{reset_link}" style="color: #667eea; word-break: break-all;">{reset_link}</a></p>
+                    </div>
+                    
+                    <div class="security-note">
+                        <h3 style="margin-top: 0; color: #721c24;">⚠️ Security Notice</h3>
+                        <p style="margin-bottom: 0;">
+                            If you did not request a password reset, please ignore this email and your password will remain unchanged. 
+                            Your account is secure and no changes have been made.
+                        </p>
+                    </div>
+                    
+                    <p style="margin-top: 20px;">For security reasons, this password reset link will expire in 1 hour.</p>
+                    
+                    <p>If you continue to have problems, please contact our support team at 
+                    <a href="mailto:support@saurara.org" style="color: #667eea;">support@saurara.org</a></p>
+                </div>
+                
+                <div class="footer">
+                    <p style="margin: 0; color: #666;">Best regards,<br><strong>The Saurara Team</strong></p>
+                    <hr style="border: none; border-top: 1px solid #e0e0e0; margin: 15px 0;">
+                    <p style="margin: 0; font-size: 12px; color: #888;">
+                        <a href="http://www.saurara.org" style="color: #667eea;">www.saurara.org</a> | 
+                        <a href="mailto:support@saurara.org" style="color: #667eea;">support@saurara.org</a>
+                    </p>
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+        
+        # Get verified sender email from environment
+        source_email = os.getenv('SES_VERIFIED_EMAIL', 'noreply@saurara.org')
+        
+        # Send email
+        response = ses_client.send_email(
+            Destination={
+                'ToAddresses': [to_email],
+            },
+            Message={
+                'Body': {
+                    'Html': {
+                        'Charset': 'UTF-8',
+                        'Data': body_html,
+                    },
+                    'Text': {
+                        'Charset': 'UTF-8',
+                        'Data': body_text,
+                    },
+                },
+                'Subject': {
+                    'Charset': 'UTF-8',
+                    'Data': subject,
+                },
+            },
+            Source=source_email,
+        )
+        
+        logger.info(f"Password reset email sent successfully via SES API to {to_email}")
+        return {
+            'success': True,
+            'method': 'SES_API',
+            'message_id': response['MessageId'],
+            'message': 'Password reset email sent successfully'
+        }
+        
+    except Exception as e:
+        logger.error(f"Error sending password reset email via SES API: {str(e)}")
+        logger.warning("SES API failed, trying SMTP method as fallback...")
+        return send_password_reset_email_smtp(to_email, username, reset_token, firstname)
+
+
+def send_password_reset_email_smtp(to_email, username, reset_token, firstname=None):
+    """Send password reset email using SMTP"""
+    try:
+        from email.mime.text import MIMEText
+        from email.mime.multipart import MIMEMultipart
+        import smtplib
+        
+        # Get SMTP credentials from environment
+        smtp_username = os.getenv('SES_SMTP_USERNAME')
+        smtp_password = os.getenv('SES_SMTP_PASSWORD')
+        smtp_host = os.getenv('SES_SMTP_HOST', 'email-smtp.us-east-1.amazonaws.com')
+        smtp_port = int(os.getenv('SES_SMTP_PORT', '587'))
+        source_email = os.getenv('SES_VERIFIED_EMAIL', 'noreply@saurara.org')
+        
+        if not smtp_username or not smtp_password:
+            raise Exception("SMTP credentials not found in environment variables")
+        
+        # Create reset link
+        reset_link = f"http://www.saurara.org/reset-password?token={reset_token}"
+        
+        # Email content
+        subject = "🔐 Reset Your Saurara Password"
+        greeting = f"Dear {firstname}" if firstname else f"Dear {username}"
+        
+        body_text = f"""{greeting},
+
+We received a request to reset your password for your Saurara account.
+
+🔑 Reset Your Password
+
+Click the link below to reset your password. This link will expire in 1 hour for security reasons.
+
+{reset_link}
+
+⚠️ Security Notice
+
+If you did not request a password reset, please ignore this email and your password will remain unchanged. Your account is secure and no changes have been made.
+
+For security reasons, this password reset link will expire in 1 hour.
+
+If you continue to have problems, please contact our support team at support@saurara.org
+
+Best regards,
+The Saurara Team
+
+---
+www.saurara.org | support@saurara.org"""
+
+        body_html = f"""
+        <html>
+        <head>
+            <style>
+                body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; line-height: 1.6; color: #333; margin: 0; padding: 0; }}
+                .container {{ max-width: 600px; margin: 0 auto; padding: 20px; background: #f8fafc; }}
+                .header {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px 20px; text-align: center; border-radius: 10px 10px 0 0; }}
+                .content {{ background: #ffffff; padding: 30px; border: 1px solid #e0e0e0; }}
+                .footer {{ background: #f8f9fa; padding: 20px; border-radius: 0 0 10px 10px; border: 1px solid #e0e0e0; border-top: none; text-align: center; }}
+                .reset-box {{ background: #fff3cd; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #ffc107; }}
+                .button {{ display: inline-block; background: #667eea; color: white; padding: 15px 30px; text-decoration: none; border-radius: 6px; font-weight: bold; margin: 15px 0; }}
+                .security-note {{ background: #f8d7da; padding: 15px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #dc3545; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <h1 style="margin: 0; font-size: 28px;">🔐 Password Reset Request</h1>
+                    <p style="margin: 10px 0 0 0; font-size: 16px; opacity: 0.9;">Saurara Platform</p>
+                </div>
+                
+                <div class="content">
+                    <p style="font-size: 18px; margin-bottom: 20px;">{greeting},</p>
+                    
+                    <p>We received a request to reset your password for your Saurara account.</p>
+                    
+                    <div class="reset-box">
+                        <h3 style="margin-top: 0; color: #856404;">🔑 Reset Your Password</h3>
+                        <p>Click the button below to reset your password. This link will expire in <strong>1 hour</strong> for security reasons.</p>
+                        <div style="text-align: center; margin: 20px 0;">
+                            <a href="{reset_link}" class="button" style="color: white; text-decoration: none;">Reset Password</a>
+                        </div>
+                        <p style="margin-bottom: 0; font-size: 14px;">Or copy and paste this link into your browser:<br>
+                        <a href="{reset_link}" style="color: #667eea; word-break: break-all;">{reset_link}</a></p>
+                    </div>
+                    
+                    <div class="security-note">
+                        <h3 style="margin-top: 0; color: #721c24;">⚠️ Security Notice</h3>
+                        <p style="margin-bottom: 0;">
+                            If you did not request a password reset, please ignore this email and your password will remain unchanged. 
+                            Your account is secure and no changes have been made.
+                        </p>
+                    </div>
+                    
+                    <p style="margin-top: 20px;">For security reasons, this password reset link will expire in 1 hour.</p>
+                    
+                    <p>If you continue to have problems, please contact our support team at 
+                    <a href="mailto:support@saurara.org" style="color: #667eea;">support@saurara.org</a></p>
+                </div>
+                
+                <div class="footer">
+                    <p style="margin: 0; color: #666;">Best regards,<br><strong>The Saurara Team</strong></p>
+                    <hr style="border: none; border-top: 1px solid #e0e0e0; margin: 15px 0;">
+                    <p style="margin: 0; font-size: 12px; color: #888;">
+                        <a href="http://www.saurara.org" style="color: #667eea;">www.saurara.org</a> | 
+                        <a href="mailto:support@saurara.org" style="color: #667eea;">support@saurara.org</a>
+                    </p>
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+        
+        # Create message
+        msg = MIMEMultipart('alternative')
+        msg['Subject'] = subject
+        msg['From'] = source_email
+        msg['To'] = to_email
+        
+        # Create the plain-text and HTML version of your message
+        text_part = MIMEText(body_text, 'plain')
+        html_part = MIMEText(body_html, 'html')
+        
+        # Add HTML/plain-text parts to MIMEMultipart message
+        msg.attach(text_part)
+        msg.attach(html_part)
+        
+        # Send the email
+        with smtplib.SMTP(smtp_host, smtp_port) as server:
+            server.starttls()
+            server.login(smtp_username, smtp_password)
+            server.sendmail(source_email, to_email, msg.as_string())
+        
+        logger.info(f"Password reset email sent successfully via SMTP to {to_email}")
+        return {
+            'success': True,
+            'method': 'SMTP',
+            'message': 'Password reset email sent successfully'
+        }
+        
+    except Exception as e:
+        logger.error(f"Error sending password reset email via SMTP: {str(e)}")
+        return {
+            'success': False,
+            'error': f"SMTP email sending failed: {str(e)}"
+        }
+
+
+@app.route('/api/forgot-password', methods=['POST'])
+def forgot_password():
+    """Request password reset - sends email with reset token"""
+    try:
+        data = request.get_json()
+        email = data.get('email')
+        
+        if not email:
+            return jsonify({'error': 'Email is required'}), 400
+        
+        # Find user by email or username
+        user = db.session.execute(
+            text("SELECT * FROM users WHERE email = :email OR username = :email"),
+            {'email': email}
+        ).fetchone()
+        
+        if not user:
+            # Don't reveal if user exists or not for security
+            return jsonify({'message': 'If an account exists with that email, a password reset link has been sent'}), 200
+        
+        # Generate reset token
+        reset_token = secrets.token_urlsafe(32)
+        reset_token_expiry = datetime.now() + timedelta(hours=1)
+        
+        # Update user with reset token
+        db.session.execute(
+            text("""
+                UPDATE users 
+                SET reset_token = :token, reset_token_expiry = :expiry 
+                WHERE id = :user_id
+            """),
+            {
+                'token': reset_token,
+                'expiry': reset_token_expiry,
+                'user_id': user.id
+            }
+        )
+        db.session.commit()
+        
+        # Send password reset email
+        email_result = send_password_reset_email(
+            to_email=user.email,
+            username=user.username,
+            reset_token=reset_token,
+            firstname=user.firstname
+        )
+        
+        if email_result.get('success'):
+            logger.info(f"Password reset email sent to {user.email}")
+        else:
+            logger.error(f"Failed to send password reset email: {email_result.get('error')}")
+        
+        return jsonify({'message': 'If an account exists with that email, a password reset link has been sent'}), 200
+        
+    except Exception as e:
+        logger.error(f"Error in forgot_password: {str(e)}")
+        db.session.rollback()
+        return jsonify({'error': 'An error occurred processing your request'}), 500
+
+
+@app.route('/api/verify-reset-token', methods=['POST'])
+def verify_reset_token():
+    """Verify if reset token is valid and not expired"""
+    try:
+        data = request.get_json()
+        token = data.get('token')
+        
+        if not token:
+            return jsonify({'error': 'Token is required'}), 400
+        
+        # Find user with this token
+        user = db.session.execute(
+            text("""
+                SELECT * FROM users 
+                WHERE reset_token = :token 
+                AND reset_token_expiry > :now
+            """),
+            {
+                'token': token,
+                'now': datetime.now()
+            }
+        ).fetchone()
+        
+        if not user:
+            return jsonify({'error': 'Invalid or expired reset token'}), 400
+        
+        return jsonify({
+            'valid': True,
+            'email': user.email
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error in verify_reset_token: {str(e)}")
+        return jsonify({'error': 'An error occurred verifying the token'}), 500
+
+
+@app.route('/api/reset-password', methods=['POST'])
+def reset_password():
+    """Reset password using valid token"""
+    try:
+        data = request.get_json()
+        token = data.get('token')
+        new_password = data.get('password')
+        
+        if not token or not new_password:
+            return jsonify({'error': 'Token and new password are required'}), 400
+        
+        # Validate password strength
+        if len(new_password) < 6:
+            return jsonify({'error': 'Password must be at least 6 characters long'}), 400
+        
+        # Find user with this token
+        user = db.session.execute(
+            text("""
+                SELECT * FROM users 
+                WHERE reset_token = :token 
+                AND reset_token_expiry > :now
+            """),
+            {
+                'token': token,
+                'now': datetime.now()
+            }
+        ).fetchone()
+        
+        if not user:
+            return jsonify({'error': 'Invalid or expired reset token'}), 400
+        
+        # Update password and clear reset token
+        db.session.execute(
+            text("""
+                UPDATE users 
+                SET password = :password, 
+                    reset_token = NULL, 
+                    reset_token_expiry = NULL 
+                WHERE id = :user_id
+            """),
+            {
+                'password': new_password,
+                'user_id': user.id
+            }
+        )
+        db.session.commit()
+        
+        logger.info(f"Password reset successful for user {user.email}")
+        return jsonify({'message': 'Password reset successful'}), 200
+        
+    except Exception as e:
+        logger.error(f"Error in reset_password: {str(e)}")
+        db.session.rollback()
+        return jsonify({'error': 'An error occurred resetting your password'}), 500
+
+
+@app.route('/api/change-password', methods=['POST'])
+def change_password():
+    """Change password for logged-in user"""
+    try:
+        data = request.get_json()
+        user_id = data.get('user_id')
+        current_password = data.get('current_password')
+        new_password = data.get('new_password')
+        
+        if not user_id or not current_password or not new_password:
+            return jsonify({'error': 'User ID, current password, and new password are required'}), 400
+        
+        # Validate password strength
+        if len(new_password) < 6:
+            return jsonify({'error': 'Password must be at least 6 characters long'}), 400
+        
+        # Verify current password
+        user = db.session.execute(
+            text("SELECT * FROM users WHERE id = :user_id AND password = :password"),
+            {'user_id': user_id, 'password': current_password}
+        ).fetchone()
+        
+        if not user:
+            return jsonify({'error': 'Current password is incorrect'}), 401
+        
+        # Update password
+        db.session.execute(
+            text("UPDATE users SET password = :password WHERE id = :user_id"),
+            {'password': new_password, 'user_id': user_id}
+        )
+        db.session.commit()
+        
+        logger.info(f"Password changed successfully for user {user_id}")
+        return jsonify({'message': 'Password changed successfully'}), 200
+        
+    except Exception as e:
+        logger.error(f"Error in change_password: {str(e)}")
+        db.session.rollback()
+        return jsonify({'error': 'An error occurred changing your password'}), 500
+
+
 # Reminder Email API Endpoints
 @app.route('/api/send-reminder-email', methods=['POST'])
 def send_reminder_email_endpoint():
@@ -6443,7 +6969,8 @@ def send_bulk_reminder_emails():
                     survey_code=user_data['survey_code'],
                     firstname=user_data.get('firstname'),
                     organization_name=user_data.get('organization_name'),
-                    days_remaining=user_data.get('days_remaining')
+                    days_remaining=user_data.get('days_remaining'),
+                    organization_id=user_data.get('organization_id')
                 )
                 
                 if result['success']:
