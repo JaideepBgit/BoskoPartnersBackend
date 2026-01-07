@@ -11174,6 +11174,7 @@ def check_email_exists():
             sub_referrals_data = []
             for sub_ref in sub_referrals:
                 sub_referrals_data.append({
+                    'id': sub_ref.id,
                     'firstName': sub_ref.first_name,
                     'lastName': sub_ref.last_name,
                     'email': sub_ref.email,
