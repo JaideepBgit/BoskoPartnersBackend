@@ -43,6 +43,9 @@ load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '.env'), overrid
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
+# Import services
+from document_parser import DocumentParserService
+
 # Email configuration
 def load_ses_credentials():
     """Load SES credentials from CSV file"""
@@ -11239,6 +11242,172 @@ def check_email_exists():
         }), 500
 
 
+@app.route('/api/organizations/search', methods=['GET'])
+def search_organizations_fuzzy():
+    """
+    Search organizations with fuzzy matching.
+    Returns organizations sorted by match confidence.
+    
+    Query params:
+        q: search query (organization name to match)
+        limit: max results (default 10)
+    """
+    try:
+        query = request.args.get('q', '').strip()
+        limit = min(int(request.args.get('limit', 10)), 50)
+        
+        if not query:
+            # If no query, return all organizations (limited)
+            organizations = Organization.query.limit(limit).all()
+            return jsonify({
+                'success': True,
+                'organizations': [{
+                    'id': org.id,
+                    'name': org.name,
+                    'type_id': org.type,
+                    'type_name': org.organization_type.type if org.organization_type else None,
+                    'match_score': 0,
+                    'match_type': 'none'
+                } for org in organizations]
+            }), 200
+        
+        # Get all organizations for matching
+        all_orgs = Organization.query.all()
+        
+        def calculate_similarity(query_str, target_str):
+            """
+            Calculate similarity score using multiple algorithms.
+            Returns a tuple of (score, match_type).
+            """
+            if not target_str:
+                return (0, 'none')
+            
+            query_lower = query_str.lower().strip()
+            target_lower = target_str.lower().strip()
+            
+            # Exact match
+            if query_lower == target_lower:
+                return (100, 'exact')
+            
+            # Contains match
+            if query_lower in target_lower or target_lower in query_lower:
+                # Calculate how much of the string matches
+                shorter = min(len(query_lower), len(target_lower))
+                longer = max(len(query_lower), len(target_lower))
+                score = int((shorter / longer) * 95)
+                return (max(score, 75), 'contains')
+            
+            # Starts with match
+            if target_lower.startswith(query_lower) or query_lower.startswith(target_lower):
+                return (90, 'starts_with')
+            
+            # Token-based matching (word overlap)
+            query_tokens = set(query_lower.split())
+            target_tokens = set(target_lower.split())
+            
+            if query_tokens and target_tokens:
+                # Calculate Jaccard similarity
+                intersection = query_tokens & target_tokens
+                union = query_tokens | target_tokens
+                jaccard = len(intersection) / len(union)
+                
+                if jaccard > 0:
+                    token_score = int(jaccard * 85)
+                    return (max(token_score, 50), 'token_match')
+            
+            # Levenshtein-like simple similarity
+            # Using a simple ratio calculation
+            def simple_ratio(s1, s2):
+                """Calculate simple similarity ratio"""
+                if not s1 or not s2:
+                    return 0
+                
+                # Count matching characters at same positions
+                matches = sum(1 for a, b in zip(s1, s2) if a == b)
+                max_len = max(len(s1), len(s2))
+                return matches / max_len
+            
+            ratio = simple_ratio(query_lower, target_lower)
+            
+            # Also try removing common words
+            common_words = {'the', 'of', 'and', 'church', 'organization', 'org', 'inc', 'ltd', 'ministry', 'ministries'}
+            
+            def clean_name(name):
+                words = name.lower().split()
+                return ' '.join(w for w in words if w not in common_words)
+            
+            clean_query = clean_name(query_str)
+            clean_target = clean_name(target_str)
+            
+            if clean_query and clean_target:
+                clean_ratio = simple_ratio(clean_query, clean_target)
+                ratio = max(ratio, clean_ratio)
+            
+            # Trigram matching
+            def get_trigrams(s):
+                s = s.lower().strip()
+                if len(s) < 3:
+                    return set()
+                return set(s[i:i+3] for i in range(len(s) - 2))
+            
+            q_trigrams = get_trigrams(query_str)
+            t_trigrams = get_trigrams(target_str)
+            
+            if q_trigrams and t_trigrams:
+                trigram_intersection = len(q_trigrams & t_trigrams)
+                trigram_union = len(q_trigrams | t_trigrams)
+                trigram_score = (trigram_intersection / trigram_union) if trigram_union > 0 else 0
+                ratio = max(ratio, trigram_score)
+            
+            if ratio > 0.3:
+                return (int(ratio * 80), 'fuzzy')
+            
+            return (0, 'none')
+        
+        # Calculate scores for all organizations
+        scored_orgs = []
+        for org in all_orgs:
+            score, match_type = calculate_similarity(query, org.name)
+            if score > 20:  # Only include organizations with some similarity
+                scored_orgs.append({
+                    'id': org.id,
+                    'name': org.name,
+                    'type_id': org.type,
+                    'type_name': org.organization_type.type if org.organization_type else None,
+                    'match_score': score,
+                    'match_type': match_type
+                })
+        
+        # Sort by score descending
+        scored_orgs.sort(key=lambda x: x['match_score'], reverse=True)
+        
+        # Limit results
+        results = scored_orgs[:limit]
+        
+        # Check for exact match
+        exact_match = None
+        for org in results:
+            if org['match_type'] == 'exact':
+                exact_match = org
+                break
+        
+        return jsonify({
+            'success': True,
+            'query': query,
+            'exact_match': exact_match,
+            'organizations': results,
+            'total_matches': len(scored_orgs)
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error searching organizations: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({
+            'success': False,
+            'error': 'Failed to search organizations'
+        }), 500
+
+
 @app.route('/api/contact-referrals/check-organization', methods=['POST'])
 def check_organization_exists():
     """
@@ -11288,6 +11457,255 @@ def check_organization_exists():
             'error': 'Failed to check organization'
         }), 500
 
+
+
+# ==========================================
+# Report Storage Logic (Added)
+# ==========================================
+
+class SavedReport(db.Model):
+    __tablename__ = 'saved_reports'
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    organization_id = db.Column(db.Integer, db.ForeignKey('organizations.id'), nullable=False)
+    title = db.Column(db.String(255), nullable=False)
+    content = db.Column(JSON, nullable=False)
+    created_at = db.Column(db.DateTime, server_default=db.func.current_timestamp())
+    updated_at = db.Column(db.DateTime, server_default=db.func.current_timestamp(), onupdate=db.func.current_timestamp())
+
+    user = db.relationship('User', backref=db.backref('saved_reports', lazy=True))
+    organization = db.relationship('Organization', backref=db.backref('saved_reports', lazy=True))
+
+@app.route('/api/init-reports-table', methods=['POST'])
+def init_reports_table():
+    try:
+        db.create_all()
+        return jsonify({'message': 'Database tables initialized'}), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/reports', methods=['GET'])
+def get_user_reports():
+    user_id = request.args.get('user_id')
+    if not user_id:
+        # If no user_id param, try to get from query string or default to 1 for testing
+        user_id = request.args.get('user_id', 1)
+    
+    try:
+        reports = SavedReport.query.filter_by(user_id=user_id).order_by(SavedReport.updated_at.desc()).all()
+        return jsonify([{
+            "id": r.id,
+            "title": r.title,
+            "updated_at": r.updated_at.isoformat() if r.updated_at else None,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+            # Return rudimentary content structure for preview if needed
+            "content_preview": "Document" 
+        } for r in reports]), 200
+    except Exception as e:
+        logger.error(f"Error fetching reports: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/reports/<int:report_id>', methods=['GET'])
+def get_report(report_id):
+    try:
+        report = SavedReport.query.get_or_404(report_id)
+        return jsonify({
+            "id": report.id,
+            "title": report.title,
+            "content": report.content,
+            "user_id": report.user_id,
+            "organization_id": report.organization_id,
+            "created_at": report.created_at.isoformat() if report.created_at else None,
+            "updated_at": report.updated_at.isoformat() if report.updated_at else None
+        }), 200
+    except Exception as e:
+        logger.error(f"Error fetching report {report_id}: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/reports', methods=['POST'])
+def save_report():
+    try:
+        data = request.get_json() or {}
+        
+        user_id = data.get('user_id')
+        org_id = data.get('organization_id')
+        title = data.get('title')
+        content = data.get('content')
+        report_id = data.get('id')
+
+        # Basic validation
+        if not title:
+             return jsonify({'error': 'Title is required'}), 400
+        
+        # Default user/org if missing (for testing)
+        if not user_id: user_id = 1
+        if not org_id: org_id = 1
+
+        if report_id:
+            report = SavedReport.query.get(report_id)
+            if report:
+                report.title = title
+                report.content = content
+                report.updated_at = datetime.utcnow()
+                db.session.commit()
+                return jsonify({'id': report.id, 'message': 'Report updated successfully'}), 200
+        
+        # Create new
+        new_report = SavedReport(
+            user_id=user_id, 
+            organization_id=org_id, 
+            title=title, 
+            content=content
+        )
+        db.session.add(new_report)
+        db.session.commit()
+        
+        return jsonify({'id': new_report.id, 'message': 'Report created successfully'}), 201
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error saving report: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/reports/<int:report_id>', methods=['DELETE'])
+def delete_report(report_id):
+    try:
+        report = SavedReport.query.get_or_404(report_id)
+        db.session.delete(report)
+        db.session.commit()
+        return jsonify({'message': 'Report deleted successfully'}), 200
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+# ============================================================================
+# RAG (Retrieval-Augmented Generation) Endpoint
+# ============================================================================
+
+# Import RAG service
+try:
+    from rag_service import SurveyRAGService
+    rag_service = SurveyRAGService(db)
+    logger.info("✅ RAG Service initialized successfully")
+except Exception as e:
+    logger.error(f"⚠️ Failed to initialize RAG Service: {e}")
+    rag_service = None
+
+@app.route('/api/rag/ask', methods=['POST'])
+def rag_ask_question():
+    """
+    RAG endpoint for answering questions about survey data
+    Uses Gemini 2.0 Flash Lite with database retrieval and grounding
+    
+    Request body:
+    {
+        "question": "What surveys do we have from churches in Kenya?",
+        "limit": 10  // optional, default 10
+    }
+    
+    Response:
+    {
+        "success": true,
+        "response": "AI-generated answer",
+        "grounding": [
+            {
+                "type": "survey_response",
+                "organization": "Example Church",
+                "organization_type": "church",
+                "user": "John Doe",
+                "location": "Nairobi, Kenya",
+                "date": "2026-01-09",
+                "status": "completed",
+                "survey_code": "ABC123"
+            }
+        ],
+        "metadata": {
+            "total_responses": 5,
+            "organizations": ["Example Church", ...],
+            "countries": ["Kenya"],
+            ...
+        },
+        "query_type": "organization_specific",
+        "model": "gemini-2.0-flash-lite"
+    }
+    """
+    try:
+        if not rag_service:
+            return jsonify({
+                'success': False,
+                'error': 'RAG service not available',
+                'response': 'The RAG service is not properly configured. Please check server logs.'
+            }), 503
+        
+        data = request.get_json() or {}
+        question = data.get('question', '').strip()
+        limit = data.get('limit', 10)
+        
+        # Validate input
+        if not question:
+            return jsonify({
+                'success': False,
+                'error': 'Question is required',
+                'response': 'Please provide a question to answer.'
+            }), 400
+        
+        # Validate limit
+        if not isinstance(limit, int) or limit < 1 or limit > 100:
+            limit = 10
+        
+        logger.info(f"📝 RAG Question received: {question}")
+        
+        # Process question using RAG service
+        result = rag_service.answer_question(question, limit=limit)
+        
+        if result.get('success'):
+            logger.info(f"✅ RAG response generated successfully")
+            return jsonify(result), 200
+        else:
+            logger.error(f"❌ RAG processing failed: {result.get('error')}")
+            return jsonify(result), 500
+            
+    except Exception as e:
+        logger.error(f"❌ Error in RAG endpoint: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({
+            'success': False,
+            'error': str(e),
+            'response': 'An error occurred while processing your question. Please try again.'
+        }), 500
+
+@app.route('/api/document/parse', methods=['POST'])
+def parse_document():
+    """Parse uploaded document and return structured questions"""
+    try:
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file part'}), 400
+            
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({'error': 'No selected file'}), 400
+            
+        parser = DocumentParserService()
+        
+        # 1. Extract Text
+        try:
+            text = parser.extract_text_from_file(file)
+            if not text:
+                return jsonify({'error': 'No text extracted from document'}), 400
+        except ValueError as e:
+            return jsonify({'error': str(e)}), 400
+            
+        # 2. Parse Questions with LLM
+        questions = parser.parse_questions_from_text(text)
+        
+        return jsonify({
+            'success': True,
+            'questions': questions,
+            'count': len(questions)
+        })
+        
+    except Exception as e:
+        logger.error(f"Error parsing document: {str(e)}")
+        return jsonify({'error': 'Internal server error processing document'}), 500
 
 if __name__ == '__main__':
     app.run(debug=False)
