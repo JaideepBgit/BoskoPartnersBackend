@@ -245,14 +245,20 @@ def create_analysis_table(db, db_session, survey_response_model, question_model)
 
 def generate_question_label(question_text: str, max_words: int = 3) -> str:
     """
-    Generate a concise 1-3 word label for a question using NLP.
+    Generate a concise, readable label for a question using improved NLP.
+    
+    This function creates grammatically correct, human-readable labels by:
+    1. Detecting common question patterns (age, year, budget, etc.)
+    2. Extracting noun phrases to maintain grammatical sense
+    3. Using semantic categories to identify key concepts
+    4. Preserving natural word order
     
     Args:
         question_text: The full question text
         max_words: Maximum number of words in the label (default: 3)
     
     Returns:
-        A concise label (e.g., "Age Group", "Leadership Training", "Budget Status")
+        A concise, readable label (e.g., "Your Age", "Annual Budget", "Leadership Training")
     """
     import re
     from nltk.corpus import stopwords
@@ -264,55 +270,230 @@ def generate_question_label(question_text: str, max_words: int = 3) -> str:
         nltk_download('stopwords', quiet=True)
         stop_words = set(stopwords.words('english'))
     
-    # Clean the question text
-    text = question_text.lower()
+    original_text = question_text.strip()
+    text = original_text.lower()
     
-    # Remove question marks and extra punctuation
-    text = re.sub(r'[?!.,;:]', '', text)
+    # Remove question marks and trailing punctuation
+    text = re.sub(r'[?!.,;:]+$', '', text).strip()
     
-    # Common question starters to remove
-    question_starters = [
-        'what is', 'what are', 'what kind of', 'what extent',
-        'how many', 'how much', 'how long',
-        'do you', 'does your', 'did you',
-        'are you', 'is your', 'is this',
-        'have you', 'has your',
-        'when was', 'when did',
-        'where is', 'where are',
-        'which', 'who',
-        'please', 'kindly'
+    # =========================================================================
+    # PHASE 1: Pattern-based extraction for common question types
+    # =========================================================================
+    
+    # Pattern definitions: (regex_pattern, label_template)
+    # These detect common survey question patterns and generate appropriate labels
+    patterns = [
+        # Age-related questions
+        (r'\b(?:your|the)\s+age\b', 'Your Age'),
+        (r'\bage\s+(?:group|range|bracket)\b', 'Age Group'),
+        (r'\bhow\s+old\b', 'Your Age'),
+        (r'\byears?\s+old\b', 'Your Age'),
+        
+        # Year-related questions
+        (r'\byear\s+(?:you\s+)?(?:start(?:ed)?|began?)\s+(\w+)', lambda m: f"Year Started {m.group(1).title()}" if m.group(1) else "Start Year"),
+        (r'\byear\s+(?:you\s+)?(?:complet(?:ed?)|finish(?:ed)?)\s+(\w+)', lambda m: f"Year Completed {m.group(1).title()}" if m.group(1) else "Completion Year"),
+        (r'\bwhen\s+did\s+you\s+(?:start|begin)\s+(\w+)', lambda m: f"Year Started {m.group(1).title()}" if m.group(1) else "Start Year"),
+        (r'\bwhen\s+(?:was|were)\s+(?:you|your|the)\s*(\w*)\s*(?:established|founded|started)', 'Establishment Year'),
+        (r'\blast\s+(?:training\s+)?year\b', 'Last Training Year'),
+        (r'\bcurrent\s+year\b', 'Current Year'),
+        (r'\bestablishment\s+year\b', 'Establishment Year'),
+        
+        # Budget/Financial questions
+        (r'\bbudget\s+(?:for\s+)?(?:the\s+)?(?:current|this)\s+year\b', 'Current Budget'),
+        (r'\b(?:annual|yearly)\s+budget\b', 'Annual Budget'),
+        (r'\btotal\s+budget\b', 'Total Budget'),
+        (r'\bbudget\s+(?:amount|size|allocation)\b', 'Budget Amount'),
+        (r'\bbudget\b', 'Budget'),
+        
+        # Training-related questions
+        (r'\b(?:leadership|management)\s+training\b', 'Leadership Training'),
+        (r'\btraining\s+(?:in\s+)?(?:leadership|management)\b', 'Leadership Training'),
+        (r'\btrained\s+(?:in\s+)?(\w+)\s*(\w*)', lambda m: f"{m.group(1).title()} Training" if m.group(1) else "Training"),
+        (r'\btraining\s+institution\b', 'Training Institution'),
+        (r'\bhighest\s+(?:training|education)\b', 'Highest Education'),
+        
+        # Education-related questions  
+        (r'\beducation(?:al)?\s+(?:level|qualification|background)\b', 'Education Level'),
+        (r'\bacademic\s+qualification\b', 'Academic Qualification'),
+        (r'\bhighest\s+degree\b', 'Highest Degree'),
+        (r'\bdegree\s+(?:obtained|earned|held)\b', 'Degree Obtained'),
+        
+        # Role/Position questions
+        (r'\b(?:are\s+you\s+)?(?:the\s+)?(?:senior\s+)?(?:pastor|president|leader|director)\b', 'Role/Position'),
+        (r'\byears?\s+(?:as|in)\s+(?:a\s+)?(\w+)', lambda m: f"Years as {m.group(1).title()}" if m.group(1) else "Years in Role"),
+        (r'\bhow\s+(?:many|long)\s+years?\b', 'Years in Role'),
+        
+        # Organization questions
+        (r'\binstitution(?:al)?\s+name\b', 'Institution Name'),
+        (r'\bchurch\s+name\b', 'Church Name'),
+        (r'\bministry\s+name\b', 'Ministry Name'),
+        (r'\borganization\s+(?:name|type)\b', 'Organization'),
+        
+        # Accreditation questions
+        (r'\b(?:actea|accredit\w*)\b', 'Accreditation'),
+        
+        # Contact/Personal info
+        (r'\bemail\s*(?:address)?\b', 'Email'),
+        (r'\bphone\s*(?:number)?\b', 'Phone'),
+        (r'\bwebsite\b', 'Website'),
+        (r'\bphysical\s+address\b', 'Address'),
+        (r'\bcity\b', 'City'),
+        (r'\bcountry\b', 'Country'),
+        
+        # Scale/Rating questions
+        (r'\brate\s+(?:your|the)\s+(\w+)', lambda m: f"{m.group(1).title()} Rating" if m.group(1) else "Rating"),
+        (r'\bsatis(?:fied|faction)\b', 'Satisfaction'),
+        (r'\beffective(?:ness)?\b', 'Effectiveness'),
+        
+        # Count/Number questions
+        (r'\bhow\s+many\s+(\w+)', lambda m: f"Number of {m.group(1).title()}" if m.group(1) else "Count"),
+        (r'\bnumber\s+of\s+(\w+)', lambda m: f"{m.group(1).title()} Count" if m.group(1) else "Count"),
+        (r'\btotal\s+(?:number\s+of\s+)?(\w+)', lambda m: f"Total {m.group(1).title()}" if m.group(1) else "Total"),
+        
+        # Software/System questions
+        (r'\bsoftware\b.*\buse\b|\buse\b.*\bsoftware\b', 'Software Used'),
+        (r'\bsystem\s+(?:platform|database)\b', 'System Platform'),
+        (r'\benrolment\s+(?:management|system)\b', 'Enrollment System'),
     ]
     
-    for starter in question_starters:
-        if text.startswith(starter):
-            text = text[len(starter):].strip()
+    # Try each pattern
+    for pattern, label_or_func in patterns:
+        match = re.search(pattern, text)
+        if match:
+            if callable(label_or_func):
+                try:
+                    result = label_or_func(match)
+                    if result:
+                        return result[:50]  # Limit length
+                except:
+                    pass
+            else:
+                return label_or_func
     
-    # Split into words
-    words = text.split()
+    # =========================================================================
+    # PHASE 2: Noun phrase extraction for remaining questions
+    # =========================================================================
     
-    # Remove stopwords but keep important ones
-    important_words = []
-    keep_words = {'years', 'year', 'many', 'much', 'long', 'old', 'new'}
+    # Remove common question prefixes more aggressively
+    question_prefixes = [
+        r'^(?:please\s+)?(?:provide|enter|select|specify|indicate|describe|explain)\s+',
+        r'^(?:what\s+(?:is|are|was|were)\s+)?(?:your|the)\s+',
+        r'^(?:do|does|did|are|is|was|were|have|has|had)\s+(?:you|your|the)\s+',
+        r'^(?:how\s+(?:many|much|long|often|well))\s+',
+        r'^(?:which|what|where|when|who|whom)\s+',
+        r'^(?:in\s+)?(?:your\s+)?(?:opinion|view|experience)\s*,?\s*',
+    ]
+    
+    cleaned_text = text
+    for prefix in question_prefixes:
+        cleaned_text = re.sub(prefix, '', cleaned_text, flags=re.IGNORECASE).strip()
+    
+    # =========================================================================
+    # PHASE 3: Extract key concepts using semantic categories
+    # =========================================================================
+    
+    # Semantic categories with associated keywords
+    semantic_categories = {
+        'Leadership': ['leader', 'leadership', 'leading', 'lead', 'manage', 'management', 'director', 'president', 'pastor', 'head'],
+        'Training': ['training', 'trained', 'train', 'education', 'educational', 'learning', 'course', 'program', 'workshop'],
+        'Financial': ['budget', 'money', 'fund', 'funding', 'dollar', 'cost', 'expense', 'revenue', 'income', 'financial'],
+        'Organization': ['organization', 'institution', 'church', 'ministry', 'school', 'college', 'university', 'seminary'],
+        'Staff': ['staff', 'faculty', 'teacher', 'instructor', 'employee', 'worker', 'member'],
+        'Student': ['student', 'enrollment', 'learner', 'pupil', 'graduate', 'alumni'],
+        'Time': ['year', 'years', 'month', 'months', 'day', 'days', 'time', 'period', 'duration'],
+        'Location': ['city', 'country', 'address', 'location', 'region', 'area', 'place'],
+        'Quality': ['quality', 'effectiveness', 'satisfaction', 'performance', 'success', 'improvement'],
+        'Resource': ['resource', 'support', 'help', 'assistance', 'service', 'facility', 'equipment'],
+    }
+    
+    # Find which categories are present
+    found_categories = []
+    for category, keywords in semantic_categories.items():
+        for keyword in keywords:
+            if keyword in cleaned_text:
+                found_categories.append(category)
+                break
+    
+    # =========================================================================
+    # PHASE 4: Smart word extraction with preserved order
+    # =========================================================================
+    
+    # Words to always remove (expanded stopwords)
+    remove_words = stop_words | {
+        'please', 'kindly', 'following', 'currently', 'currently',
+        'example', 'examples', 'briefly', 'detail', 'details',
+        'regarding', 'concerning', 'about', 'related', 'relation',
+        'think', 'believe', 'feel', 'consider', 'agree', 'disagree',
+    }
+    
+    # Words to prioritize keeping (domain-specific important words)
+    priority_words = {
+        'age', 'year', 'years', 'budget', 'training', 'education',
+        'leadership', 'staff', 'faculty', 'student', 'enrollment',
+        'accreditation', 'institution', 'church', 'ministry',
+        'president', 'pastor', 'director', 'leader',
+        'degree', 'qualification', 'experience', 'software',
+        'support', 'resource', 'name', 'email', 'phone', 'address',
+        'city', 'country', 'rating', 'score', 'level', 'type',
+        'number', 'total', 'current', 'annual', 'last', 'first',
+        'highest', 'primary', 'main', 'formal', 'informal',
+    }
+    
+    # Extract words, keeping priority words and filtering out remove_words
+    words = cleaned_text.split()
+    
+    # Build label from priority words first, then other important words
+    priority_found = []
+    other_found = []
     
     for word in words:
-        if word not in stop_words or word in keep_words:
-            # Skip very short words unless they're important
-            if len(word) > 2 or word in keep_words:
-                important_words.append(word)
+        # Clean the word
+        word_clean = re.sub(r'[^a-z]', '', word.lower())
+        if not word_clean or len(word_clean) < 2:
+            continue
+            
+        if word_clean in priority_words:
+            priority_found.append(word_clean)
+        elif word_clean not in remove_words and len(word_clean) > 2:
+            other_found.append(word_clean)
     
-    # Take first max_words important words
-    label_words = important_words[:max_words]
+    # Combine: prioritize priority words, then fill with other words
+    all_candidates = priority_found + other_found
     
-    # Capitalize each word
+    # Remove duplicates while preserving order
+    seen = set()
+    unique_words = []
+    for w in all_candidates:
+        if w not in seen:
+            seen.add(w)
+            unique_words.append(w)
+    
+    # Take up to max_words
+    label_words = unique_words[:max_words]
+    
+    # Capitalize properly
     label = ' '.join(word.capitalize() for word in label_words)
+    
+    # =========================================================================
+    # PHASE 5: Final cleanup and fallback
+    # =========================================================================
     
     # Handle empty labels
     if not label:
-        # Fallback: take first few words of original question
-        fallback_words = question_text.split()[:max_words]
+        # Fallback: take first significant words from original question
+        fallback_words = [w for w in original_text.split() if len(w) > 2][:max_words]
         label = ' '.join(word.capitalize() for word in fallback_words)
     
-    return label
+    # Final cleanup
+    label = re.sub(r'\s+', ' ', label).strip()
+    
+    # Ensure reasonable length
+    if len(label) > 40:
+        # Truncate at word boundary
+        truncated = label[:40].rsplit(' ', 1)[0]
+        label = truncated + '...' if truncated != label else label
+    
+    return label if label else "Question"
 
 
 def generate_section_summary(questions: List[Dict]) -> str:

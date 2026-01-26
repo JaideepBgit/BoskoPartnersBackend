@@ -133,18 +133,18 @@ def send_welcome_email_smtp(to_email, username, password, firstname=None, survey
         
         body_text = f"""{greeting},
 
-🎉 Welcome to the Saurara Platform! We are thrilled to have you join our growing community of researchers, educators, and community leaders.
+Welcome to the Saurara Platform! We are thrilled to have you join our growing community of researchers, educators, and community leaders.
 
 We're excited to welcome you aboard! Your account has been successfully created and you're ready to embark on your journey with us.
 
-🔐 Your Account Credentials:
+Your Account Credentials:
 • Username: {username}
 • Email Address: {to_email}
 • Temporary Password: {password}
 • Survey Code: {survey_code if survey_code else 'Not assigned'}
 • Platform Access: www.saurara.org
 
-🚀 Quick Start Guide:
+Quick Start Guide:
 1. Visit www.saurara.org
 2. Click on "Login" or "Survey Access"
 3. Enter your username and password above
@@ -152,26 +152,26 @@ We're excited to welcome you aboard! Your account has been successfully created 
 5. Explore survey opportunities and platform features
 6. Connect with your organization and peers
 
-🔒 Important Security Information:
+Important Security Information:
 For your account security, please change your password during your first login. Keep your credentials safe and never share them with unauthorized individuals.
 
-🎯 What Awaits You:
+What Awaits You:
 As a member of the Saurara community, you'll receive invitations to participate in meaningful research initiatives. Your insights will contribute to understanding and improving educational and community programs worldwide. Every response makes a difference!
 
-📚 Platform Features:
+Platform Features:
 • Personalized survey dashboard
 • Progress tracking and completion status
 • Secure data handling and privacy protection
 • Community insights and research updates
 • Professional networking opportunities
 
-💡 Getting the Most Out of Saurara:
+Getting the Most Out of Saurara:
 - Complete your profile for better survey matching
 - Respond to surveys thoughtfully and thoroughly
 - Stay engaged with platform updates and announcements
 - Reach out for support whenever needed
 
-🆘 Need Assistance?
+Need Assistance?
 Our dedicated support team is here to help you succeed. Whether you have technical questions, need guidance on surveys, or want to learn more about our research initiatives, we're just a message away!
 
 We're honored to have you as part of the Saurara family. Together, we're building a better understanding of education and community development globally.
@@ -182,9 +182,9 @@ Best regards,
 The Saurara Research Team
 
 ---
-🌐 Platform: www.saurara.org
-📧 Support: support@saurara.org
-📱 Stay Connected: Follow us for updates and insights"""
+Platform: www.saurara.org
+Support: info@saurara.org
+Stay Connected: Follow us for updates and insights"""
 
         body_html = f"""
         <html>
@@ -283,9 +283,9 @@ The Saurara Research Team
                         <span class="welcome-tag">WELCOME</span>
                     </div>
                     <p style="margin: 15px 0 0 0; text-align: center; color: #6b7280; font-size: 14px;">
-                        🌐 <a href="http://www.saurara.org" style="color: #667eea; text-decoration: none; font-weight: 500;">www.saurara.org</a> | 
-                        📧 <a href="mailto:support@saurara.org" style="color: #667eea; text-decoration: none; font-weight: 500;">support@saurara.org</a><br>
-                        📱 <strong>Stay Connected:</strong> Follow us for updates and insights
+                        <a href="http://www.saurara.org" style="color: #667eea; text-decoration: none; font-weight: 500;">www.saurara.org</a> | 
+                        <a href="mailto:info@saurara.org" style="color: #667eea; text-decoration: none; font-weight: 500;">info@saurara.org</a><br>
+                        <strong>Stay Connected:</strong> Follow us for updates and insights
                     </p>
                 </div>
             </div>
@@ -557,7 +557,7 @@ Best regards,
 The Saurara Research Team
 
 ---
-Survey Platform: www.saurara.org | Support: support@saurara.org"""
+Survey Platform: www.saurara.org | Support: info@saurara.org"""
 
         body_html = f"""
         <html>
@@ -643,7 +643,7 @@ Survey Platform: www.saurara.org | Support: support@saurara.org"""
                         <strong>🆘 Need Help?</strong><br>
                         Contact our support team if you have questions or technical difficulties.<br>
                         <strong>🌐 Platform:</strong> <a href="http://www.saurara.org" style="color: #28a745; font-weight: 600; text-decoration: none;">www.saurara.org</a> | 
-                        <strong>📧 Support:</strong> <a href="mailto:support@saurara.org" style="color: #28a745; font-weight: 600; text-decoration: none;">support@saurara.org</a>
+                        <strong>📧 Support:</strong> <a href="mailto:info@saurara.org" style="color: #28a745; font-weight: 600; text-decoration: none;">info@saurara.org</a>
                     </p>
                 </div>
             </div>
@@ -737,7 +737,7 @@ Best regards,
 The Saurara Research Team
 
 ---
-Survey Platform: www.saurara.org | Support: support@saurara.org"""
+Survey Platform: www.saurara.org | Support: info@saurara.org"""
 
         body_html = f"""
         <html>
@@ -823,7 +823,7 @@ Survey Platform: www.saurara.org | Support: support@saurara.org"""
                         <strong>🆘 Need Help?</strong><br>
                         Contact our support team if you have questions or technical difficulties.<br>
                         <strong>🌐 Platform:</strong> <a href="http://www.saurara.org" style="color: #28a745; font-weight: 600; text-decoration: none;">www.saurara.org</a> | 
-                        <strong>📧 Support:</strong> <a href="mailto:support@saurara.org" style="color: #28a745; font-weight: 600; text-decoration: none;">support@saurara.org</a>
+                        <strong>📧 Support:</strong> <a href="mailto:info@saurara.org" style="color: #28a745; font-weight: 600; text-decoration: none;">info@saurara.org</a>
                     </p>
                 </div>
             </div>
@@ -901,7 +901,7 @@ Your login password was sent in your WELCOME EMAIL when your account was created
 Please search your email inbox for "Welcome to Saurara Platform" to find your credentials.
 
 If you cannot find your welcome email or need to reset your password, please use the 
-"Forgot Password" link on the login page or contact support at support@saurara.org
+"Forgot Password" link on the login page or contact support at info@saurara.org
 
 Why Your Response Matters:
 Your input is invaluable in helping us understand and improve educational and community initiatives. Every response contributes to meaningful research that can make a real difference in communities like yours.
@@ -926,7 +926,7 @@ The Saurara Research Team
 
 ---
 This is an automated reminder. If you have already completed the survey, please disregard this message.
-Visit: www.saurara.org | Email: support@saurara.org"""
+Visit: www.saurara.org | Email: info@saurara.org"""
 
         body_html = f"""
         <html>
@@ -981,7 +981,7 @@ Visit: www.saurara.org | Email: support@saurara.org"""
                             <br><br>
                             If you cannot find your welcome email or need to reset your password, please use the 
                             <strong>"Forgot Password"</strong> link on the login page or contact support at 
-                            <a href="mailto:support@saurara.org" style="color: #667eea;">support@saurara.org</a>
+                            <a href="mailto:info@saurara.org" style="color: #667eea;">info@saurara.org</a>
                         </p>
                     </div>
                     
@@ -1022,7 +1022,7 @@ Visit: www.saurara.org | Email: support@saurara.org"""
                         <span class="reminder-tag">REMINDER</span><br><br>
                         This is an automated reminder. If you have already completed the survey, please disregard this message.<br>
                         <a href="http://www.saurara.org" style="color: #667eea;">www.saurara.org</a> | 
-                        <a href="mailto:support@saurara.org" style="color: #667eea;">support@saurara.org</a>
+                        <a href="mailto:info@saurara.org" style="color: #667eea;">info@saurara.org</a>
                     </p>
                 </div>
             </div>
@@ -1150,12 +1150,12 @@ Your login password was sent in your WELCOME EMAIL when your account was created
 Please search your email inbox for "Welcome to Saurara Platform" to find your credentials.
 
 If you cannot find your welcome email or need to reset your password, please use the 
-"Forgot Password" link on the login page or contact support at support@saurara.org
+"Forgot Password" link on the login page or contact support at info@saurara.org
 
 Best regards,
 The Saurara Research Team"""
 
-            body_html = f"""<html><body><h1>Survey Reminder</h1><p>{greeting},</p><p>This is a friendly reminder that you have a pending survey on the Saurara Platform.</p><p><strong>Survey Code:</strong> {survey_code}</p><div style="background: #fff3cd; padding: 15px; margin: 20px 0; border-left: 4px solid #ffc107;"><h3>🔑 Need Your Password?</h3><p>Your login password was sent in your <strong>Welcome Email</strong> when your account was created. Please search your email inbox for "Welcome to Saurara Platform" to find your credentials.</p><p>If you cannot find your welcome email or need to reset your password, please use the "Forgot Password" link on the login page or contact support at support@saurara.org</p></div><p>Visit: www.saurara.org</p><p>Best regards,<br>The Saurara Research Team</p></body></html>"""
+            body_html = f"""<html><body><h1>Survey Reminder</h1><p>{greeting},</p><p>This is a friendly reminder that you have a pending survey on the Saurara Platform.</p><p><strong>Survey Code:</strong> {survey_code}</p><div style="background: #fff3cd; padding: 15px; margin: 20px 0; border-left: 4px solid #ffc107;"><h3>🔑 Need Your Password?</h3><p>Your login password was sent in your <strong>Welcome Email</strong> when your account was created. Please search your email inbox for "Welcome to Saurara Platform" to find your credentials.</p><p>If you cannot find your welcome email or need to reset your password, please use the "Forgot Password" link on the login page or contact support at info@saurara.org</p></div><p>Visit: www.saurara.org</p><p>Best regards,<br>The Saurara Research Team</p></body></html>"""
         
         ses_client = get_ses_client()
         if not ses_client:
@@ -1576,6 +1576,16 @@ class EmailTemplate(db.Model):
 # ---------- Email Template Models (Simplified) ----------
 
 
+# Title model for the titles table
+class Title(db.Model):
+    __tablename__ = 'titles'
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100), unique=True, nullable=False)
+    
+    def __repr__(self):
+        return f'<Title {self.name}>'
+
+
 class User(db.Model):
     __tablename__ = 'users'
     id = db.Column(db.Integer, primary_key=True)
@@ -1583,21 +1593,28 @@ class User(db.Model):
     username = db.Column(db.String(50), unique=True, nullable=False)
     email = db.Column(db.String(100), unique=True, nullable=False)
     password = db.Column(db.String(255), nullable=False)
-    role = db.Column(db.Enum('admin', 'user', 'manager', 'other', 'primary_contact', 'secondary_contact', 'head'), default='user')
+    role = db.Column(db.Enum('admin', 'user', 'manager', 'other', 'head', 'root'), default='user')
     firstname = db.Column(db.String(50))
     lastname = db.Column(db.String(50))
     survey_code = db.Column(db.String(36), nullable=True)  # UUID as string for user surveys
     geo_location_id = db.Column(db.Integer, db.ForeignKey('geo_locations.id'), nullable=True)
     phone = db.Column(db.String(20), nullable=True)  # Added for contact information
+    title_id = db.Column(db.Integer, db.ForeignKey('titles.id'), nullable=True)  # New: references titles table
     created_at = db.Column(db.DateTime, server_default=db.func.current_timestamp())
     updated_at = db.Column(db.DateTime, server_default=db.func.current_timestamp(), onupdate=db.func.current_timestamp())
+    
+    # Password reset fields
+    reset_token = db.Column(db.String(128), nullable=True)
+    reset_token_expires = db.Column(db.DateTime, nullable=True)
     
     # Relationships
     organization = db.relationship('Organization', foreign_keys=[organization_id], backref=db.backref('users', lazy=True))
     geo_location = db.relationship('GeoLocation', foreign_keys=[geo_location_id])
+    title = db.relationship('Title', foreign_keys=[title_id], backref=db.backref('users', lazy=True))
     
     def __repr__(self):
         return f'<User {self.username}>'
+
 
 class UserDetails(db.Model):
     __tablename__ = 'user_details'
@@ -1741,25 +1758,33 @@ class Role(db.Model):
     def __repr__(self):
         return f'<Role {self.name}>'
 
-class UserOrganizationRole(db.Model):
-    __tablename__ = 'user_organization_roles'
+class UserOrganizationTitle(db.Model):
+    """
+    Maps users to organizations with specific titles.
+    Renamed from user_organization_roles to user_organization_titles.
+    """
+    __tablename__ = 'user_organization_titles'
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     organization_id = db.Column(db.Integer, db.ForeignKey('organizations.id'), nullable=False)
-    role_id = db.Column(db.Integer, db.ForeignKey('roles.id'), nullable=False)  # Changed from role_type to role_id
+    title_id = db.Column(db.Integer, db.ForeignKey('titles.id'), nullable=True)  # Changed from role_id to title_id
     created_at = db.Column(db.DateTime, server_default=db.func.current_timestamp())
     updated_at = db.Column(db.DateTime, server_default=db.func.current_timestamp(), onupdate=db.func.current_timestamp())
     
     # Relationships
-    user = db.relationship('User', backref=db.backref('organization_roles', lazy=True))
-    organization = db.relationship('Organization', backref=db.backref('user_roles', lazy=True))
-    role = db.relationship('Role', backref=db.backref('user_organization_assignments', lazy=True))
+    user = db.relationship('User', backref=db.backref('organization_titles', lazy=True))
+    organization = db.relationship('Organization', backref=db.backref('user_titles', lazy=True))
+    title = db.relationship('Title', backref=db.backref('user_organization_assignments', lazy=True))
     
-    # Ensure unique combination of user, organization, and role
-    __table_args__ = (UniqueConstraint('user_id', 'organization_id', 'role_id'),)
+    # Ensure unique combination of user, organization, and title
+    __table_args__ = (UniqueConstraint('user_id', 'organization_id', 'title_id'),)
 
     def __repr__(self):
-        return f'<UserOrganizationRole user_id={self.user_id} org_id={self.organization_id} role_id={self.role_id}>'
+        return f'<UserOrganizationTitle user_id={self.user_id} org_id={self.organization_id} title_id={self.title_id}>'
+
+
+# Keep alias for backward compatibility with existing code
+UserOrganizationRole = UserOrganizationTitle
 
 """
 FIXED - Survey model with unique backref name to avoid conflicts:
@@ -1948,7 +1973,9 @@ def get_users():
         'username': user.username,
         'email': user.email,
         'role': user.role,
-        'organization_id': user.organization_id
+        'organization_id': user.organization_id,
+        'title': user.title.name if user.title else None,
+        'title_id': user.title_id
     } for user in users]
     return jsonify(users_list)
 
@@ -1990,7 +2017,9 @@ def login():
             "username": user.username,
             "email": user.email,
             "role": user.role,
-            "survey_code": user.survey_code  # Include survey code for users
+            "survey_code": user.survey_code,  # Include survey code for users
+            "title": user.title.name if user.title else None,  # Include title name
+            "title_id": user.title_id  # Include title ID
         }
     }), 200
 
@@ -2017,6 +2046,7 @@ def register():
         "user_id": new_user.id,
         "survey_code": survey_code
     }), 201
+
 
 @app.route('/api/surveys/validate', methods=['POST'])
 def validate_survey():
@@ -3596,37 +3626,37 @@ def add_organization():
             if lead_user:
                 lead_user.organization_id = new_org.id
         
-        # Create user_organization_roles entries for assigned contacts
-        def add_user_organization_role(user_id, role_name):
+        # Create user_organization_titles entries for assigned contacts (renamed from user_organization_roles)
+        def add_user_organization_title(user_id, title_name):
             if user_id:
-                role = Role.query.filter_by(name=role_name).first()
-                if role:
-                    # Check if role assignment already exists
-                    existing_role = UserOrganizationRole.query.filter_by(
+                title = Title.query.filter_by(name=title_name).first()
+                if title:
+                    # Check if title assignment already exists
+                    existing_title = UserOrganizationTitle.query.filter_by(
                         user_id=user_id,
                         organization_id=new_org.id,
-                        role_id=role.id
+                        title_id=title.id
                     ).first()
                     
-                    if not existing_role:
-                        user_org_role = UserOrganizationRole(
+                    if not existing_title:
+                        user_org_title = UserOrganizationTitle(
                             user_id=user_id,
                             organization_id=new_org.id,
-                            role_id=role.id
+                            title_id=title.id
                         )
-                        db.session.add(user_org_role)
-                        logger.info(f"Added {role_name} role for user {user_id} in organization {new_org.id}")
+                        db.session.add(user_org_title)
+                        logger.info(f"Added {title_name} title for user {user_id} in organization {new_org.id}")
                 else:
-                    logger.warning(f"Role {role_name} not found in database")
+                    logger.warning(f"Title {title_name} not found in database")
         
-        # Add organizational roles for all contacts (both new and existing)
+        # Add organizational titles for all contacts (both new and existing)
         final_primary_id = primary_contact_id or existing_primary_contact_id
         final_secondary_id = secondary_contact_id or existing_secondary_contact_id
         final_head_id = lead_id or existing_head_id
         
-        add_user_organization_role(final_primary_id, 'primary_contact')
-        add_user_organization_role(final_secondary_id, 'secondary_contact')
-        add_user_organization_role(final_head_id, 'head')
+        add_user_organization_title(final_primary_id, 'Primary Contact')
+        add_user_organization_title(final_secondary_id, 'Secondary Contact')
+        add_user_organization_title(final_head_id, 'Leader')
         
         # Only create survey template version for main organization types
         if create_survey_template:
@@ -5749,9 +5779,9 @@ def initialize_default_email_templates():
                         <p style="margin: 0; color: #64748b;">Best regards,<br><strong>The Saurara Research Team</strong></p>
                         <div style="margin-top: 20px; padding-top: 20px; border-top: 1px solid #e2e8f0;">
                             <p style="margin: 0; font-size: 14px; color: #64748b;">
-                                🌐 <a href="http://www.saurara.org" style="color: #667eea;">www.saurara.org</a> | 
-                                📧 support@saurara.org | 
-                                📱 Stay Connected
+                                <a href="http://www.saurara.org" style="color: #667eea;">www.saurara.org</a> | 
+                                info@saurara.org | 
+                                Stay Connected
                             </p>
                         </div>
                     </div>
@@ -5799,9 +5829,9 @@ Best regards,
 The Saurara Research Team
 
 ---
-🌐 Platform: www.saurara.org
-📧 Support: support@saurara.org
-📱 Stay Connected: Follow us for updates and insights"""
+Platform: www.saurara.org
+Support: info@saurara.org
+Stay Connected: Follow us for updates and insights"""
 
             welcome_template = EmailTemplate(
                 organization_id=first_org.id,
@@ -5884,7 +5914,7 @@ The Saurara Research Team
                         <hr style="margin: 20px 0; border: none; border-top: 1px solid #e0e0e0;">
                         <p style="margin: 0; font-size: 12px; color: #666;">
                             This is an automated reminder. If you have already completed the survey, please disregard this message.<br>
-                            Visit: <a href="http://www.saurara.org" style="color: #667eea;">www.saurara.org</a> | Email: support@saurara.org
+                            Visit: <a href="http://www.saurara.org" style="color: #667eea;">www.saurara.org</a> | Email: info@saurara.org
                         </p>
                     </div>
                 </div>
@@ -5926,12 +5956,12 @@ The Saurara Research Team
 
 ---
 This is an automated reminder. If you have already completed the survey, please disregard this message.
-Visit: www.saurara.org | Email: support@saurara.org"""
+Visit: www.saurara.org | Email: info@saurara.org"""
 
             reminder_template = EmailTemplate(
                 organization_id=first_org.id,
                 name='Default Reminder Email',
-                subject='🔔 Reminder: Complete Your Saurara Survey',
+                subject='Reminder: Complete Your Saurara Survey',
                 html_body=reminder_html,
                 text_body=reminder_text,
                 is_public=True
@@ -5961,7 +5991,7 @@ Visit: www.saurara.org | Email: support@saurara.org"""
             <body>
                 <div class="container">
                     <div class="header">
-                        <h1 style="margin: 0; font-size: 32px;">📋 Survey Invitation</h1>
+                        <h1 style="margin: 0; font-size: 32px;">Survey Invitation</h1>
                         <p style="margin: 15px 0 0 0; font-size: 18px; opacity: 0.9;">Your Participation Matters</p>
                     </div>
                     
@@ -6009,7 +6039,7 @@ Visit: www.saurara.org | Email: support@saurara.org"""
                         
                         <p style="background: #fef3c7; padding: 20px; border-radius: 8px; border-left: 4px solid #f59e0b; margin: 25px 0;">
                             <strong><span class="emoji">🆘</span> Need Help?</strong><br>
-                            Our support team is here to assist you. Contact us at <a href="mailto:support@saurara.org" style="color: #667eea;">support@saurara.org</a> if you have any questions.
+                            Our support team is here to assist you. Contact us at <a href="mailto:info@saurara.org" style="color: #667eea;">info@saurara.org</a> if you have any questions.
                         </p>
                         
                         <p style="margin: 25px 0;">We look forward to your valuable contribution!</p>
@@ -6021,9 +6051,9 @@ Visit: www.saurara.org | Email: support@saurara.org"""
                         <p style="margin: 0; color: #64748b;">Best regards,<br><strong>The Saurara Research Team</strong></p>
                         <div style="margin-top: 20px; padding-top: 20px; border-top: 1px solid #e2e8f0;">
                             <p style="margin: 0; font-size: 14px; color: #64748b;">
-                                🌐 <a href="http://www.saurara.org" style="color: #667eea;">www.saurara.org</a> | 
-                                📧 <a href="mailto:support@saurara.org" style="color: #667eea;">support@saurara.org</a> | 
-                                📱 Stay Connected
+                                <a href="http://www.saurara.org" style="color: #667eea;">www.saurara.org</a> | 
+                                <a href="mailto:info@saurara.org" style="color: #667eea;">info@saurara.org</a> | 
+                                Stay Connected
                             </p>
                         </div>
                     </div>
@@ -6038,29 +6068,29 @@ We're excited to invite you to participate in an important research survey{{org_
 
 Your participation will contribute to valuable research that helps improve educational and community programs. We've created a temporary account for you to access the survey.
 
-🔐 Your Temporary Account Credentials:
+Your Temporary Account Credentials:
 • Username: {{username}}
 • Temporary Password: {{password}}
 • Survey Access: www.saurara.org
 
-📋 What You Need to Do:
+What You Need to Do:
 1. Visit www.saurara.org
 2. Click "Login" or "Survey Access"
 3. Enter your username and temporary password
 4. Complete the survey (takes about 15-20 minutes)
 5. Change your password during first login for security
 
-🎯 Why Your Response Matters:
+Why Your Response Matters:
 Your insights will help researchers understand and improve programs that benefit communities like yours. Every response makes a difference!
 
-💡 Survey Features:
+Survey Features:
 • Save progress and return later
 • Mobile-friendly interface
 • Secure data handling
 • Professional insights dashboard
 
 🆘 Need Help?
-Our support team is here to assist you. Contact us at support@saurara.org if you have any questions.
+Our support team is here to assist you. Contact us at info@saurara.org if you have any questions.
 
 We look forward to your valuable contribution!
 
@@ -6068,13 +6098,13 @@ Best regards,
 The Saurara Research Team
 
 ---
-🌐 Platform: www.saurara.org
-📧 Support: support@saurara.org"""
+Platform: www.saurara.org
+Support: info@saurara.org"""
 
             invitation_template = EmailTemplate(
                 organization_id=first_org.id,
                 name='Default Invitation Email',
-                subject='📋 You\'re Invited: Complete the Saurara Survey',
+                subject='You\'re Invited: Complete the Saurara Survey',
                 html_body=invitation_html,
                 text_body=invitation_text,
                 is_public=True
@@ -6434,13 +6464,13 @@ If you did not request a password reset, please ignore this email and your passw
 
 For security reasons, this password reset link will expire in 1 hour.
 
-If you continue to have problems, please contact our support team at support@saurara.org
+If you continue to have problems, please contact our support team at info@saurara.org
 
 Best regards,
 The Saurara Team
 
 ---
-www.saurara.org | support@saurara.org"""
+www.saurara.org | info@saurara.org"""
 
         body_html = f"""
         <html>
@@ -6489,7 +6519,7 @@ www.saurara.org | support@saurara.org"""
                     <p style="margin-top: 20px;">For security reasons, this password reset link will expire in 1 hour.</p>
                     
                     <p>If you continue to have problems, please contact our support team at 
-                    <a href="mailto:support@saurara.org" style="color: #667eea;">support@saurara.org</a></p>
+                    <a href="mailto:info@saurara.org" style="color: #667eea;">info@saurara.org</a></p>
                 </div>
                 
                 <div class="footer">
@@ -6497,7 +6527,7 @@ www.saurara.org | support@saurara.org"""
                     <hr style="border: none; border-top: 1px solid #e0e0e0; margin: 15px 0;">
                     <p style="margin: 0; font-size: 12px; color: #888;">
                         <a href="http://www.saurara.org" style="color: #667eea;">www.saurara.org</a> | 
-                        <a href="mailto:support@saurara.org" style="color: #667eea;">support@saurara.org</a>
+                        <a href="mailto:info@saurara.org" style="color: #667eea;">info@saurara.org</a>
                     </p>
                 </div>
             </div>
@@ -6586,13 +6616,13 @@ If you did not request a password reset, please ignore this email and your passw
 
 For security reasons, this password reset link will expire in 1 hour.
 
-If you continue to have problems, please contact our support team at support@saurara.org
+If you continue to have problems, please contact our support team at ifo@saurara.org
 
 Best regards,
 The Saurara Team
 
 ---
-www.saurara.org | support@saurara.org"""
+www.saurara.org | info@saurara.org"""
 
         body_html = f"""
         <html>
@@ -6641,7 +6671,7 @@ www.saurara.org | support@saurara.org"""
                     <p style="margin-top: 20px;">For security reasons, this password reset link will expire in 1 hour.</p>
                     
                     <p>If you continue to have problems, please contact our support team at 
-                    <a href="mailto:support@saurara.org" style="color: #667eea;">support@saurara.org</a></p>
+                    <a href="mailto:info@saurara.org" style="color: #667eea;">info@saurara.org</a></p>
                 </div>
                 
                 <div class="footer">
@@ -6649,7 +6679,7 @@ www.saurara.org | support@saurara.org"""
                     <hr style="border: none; border-top: 1px solid #e0e0e0; margin: 15px 0;">
                     <p style="margin: 0; font-size: 12px; color: #888;">
                         <a href="http://www.saurara.org" style="color: #667eea;">www.saurara.org</a> | 
-                        <a href="mailto:support@saurara.org" style="color: #667eea;">support@saurara.org</a>
+                        <a href="mailto:info@saurara.org" style="color: #667eea;">info@saurara.org</a>
                     </p>
                 </div>
             </div>
@@ -7181,18 +7211,18 @@ def generate_welcome_email_preview():
         # Generate text version
         text_content = f"""{greeting},
 
-🎉 Welcome to the Saurara Platform! We are thrilled to have you join our growing community of researchers, educators, and community leaders.
+Welcome to the Saurara Platform! We are thrilled to have you join our growing community of researchers, educators, and community leaders.
 
 We're excited to welcome you aboard! Your account has been successfully created and you're ready to embark on your journey with us.
 
-🔐 Your Account Credentials:
+Your Account Credentials:
 • Username: {username}
 • Email Address: {email}
 • Temporary Password: {password}
 • Survey Code: {survey_code}
 • Platform Access: www.saurara.org
 
-🚀 Quick Start Guide:
+Quick Start Guide:
 1. Visit www.saurara.org
 2. Click on "Login" or "Survey Access"
 3. Enter your username and password above
@@ -7200,39 +7230,39 @@ We're excited to welcome you aboard! Your account has been successfully created 
 5. Explore survey opportunities and platform features
 6. Connect with your organization and peers
 
-🔒 Important Security Information:
+Important Security Information:
 For your account security, please change your password during your first login. Keep your credentials safe and never share them with unauthorized individuals.
 
-🎯 What Awaits You:
+What Awaits You:
 As a member of the Saurara community, you'll receive invitations to participate in meaningful research initiatives. Your insights will contribute to understanding and improving educational and community programs worldwide. Every response makes a difference!
 
-📚 Platform Features:
+Platform Features:
 • Personalized survey dashboard
 • Progress tracking and completion status
 • Secure data handling and privacy protection
 • Community insights and research updates
 • Professional networking opportunities
 
-💡 Getting the Most Out of Saurara:
+Getting the Most Out of Saurara:
 - Complete your profile for better survey matching
 - Respond to surveys thoughtfully and thoroughly
 - Stay engaged with platform updates and announcements
 - Reach out for support whenever needed
 
-🆘 Need Assistance?
+Need Assistance?
 Our dedicated support team is here to help you succeed. Whether you have technical questions, need guidance on surveys, or want to learn more about our research initiatives, we're just a message away!
 
 We're honored to have you as part of the Saurara family. Together, we're building a better understanding of education and community development globally.
 
-Welcome aboard! 🌟
+Welcome aboard!
 
 Best regards,
 The Saurara Research Team
 
 ---
-🌐 Platform: www.saurara.org
-📧 Support: support@saurara.org
-📱 Stay Connected: Follow us for updates and insights"""
+Platform: www.saurara.org
+Support: info@saurara.org
+Stay Connected: Follow us for updates and insights"""
 
         # Generate HTML version
         html_content = f"""<!DOCTYPE html>
@@ -7277,35 +7307,35 @@ The Saurara Research Team
             <p style="font-size: 19px; margin-bottom: 25px; color: #374151;">{greeting},</p>
             
             <div class="welcome-banner">
-                <h2 style="margin: 0 0 10px 0; font-size: 24px;">🌟 Welcome to Our Community!</h2>
+                <h2 style="margin: 0 0 10px 0; font-size: 24px;">Welcome to Our Community!</h2>
                 <p style="margin: 0; font-size: 16px; opacity: 0.95;">We are thrilled to have you join our growing community of researchers, educators, and community leaders. Your account has been successfully created and you're ready to embark on your journey with us!</p>
             </div>
             
             <div class="credentials-box">
-                <h3 style="color: #065f46; margin-top: 0; font-size: 20px;">🔐 Your Account Credentials</h3>
+                <h3 style="color: #065f46; margin-top: 0; font-size: 20px;">Your Account Credentials</h3>
                 <div class="credential-item">
-                    <strong>👤 Username:</strong> <code style="background: #f3f4f6; padding: 4px 8px; border-radius: 6px; font-family: 'Courier New', monospace; color: #374151; font-weight: bold;">{username}</code>
+                    <strong> Username:</strong> <code style="background: #f3f4f6; padding: 4px 8px; border-radius: 6px; font-family: 'Courier New', monospace; color: #374151; font-weight: bold;">{username}</code>
                 </div>
                 <div class="credential-item">
-                    <strong>📧 Email Address:</strong> <span style="color: #3b82f6; font-weight: 500;">{email}</span>
+                    <strong>Email Address:</strong> <span style="color: #3b82f6; font-weight: 500;">{email}</span>
                 </div>
                 <div class="credential-item">
-                    <strong>🔑 Temporary Password:</strong> <code style="background: #fef3c7; padding: 4px 8px; border-radius: 6px; font-family: 'Courier New', monospace; color: #92400e; font-weight: bold; border: 1px solid #f59e0b;">{password}</code>
+                    <strong>Temporary Password:</strong> <code style="background: #fef3c7; padding: 4px 8px; border-radius: 6px; font-family: 'Courier New', monospace; color: #92400e; font-weight: bold; border: 1px solid #f59e0b;">{password}</code>
                 </div>
                 <div class="credential-item">
-                    <strong>🆔 Survey Code:</strong> <code style="background: #f0f9ff; padding: 4px 8px; border-radius: 6px; font-family: 'Courier New', monospace; color: #1e40af; font-weight: bold; border: 1px solid #3b82f6;">{survey_code}</code>
+                    <strong>Survey Code:</strong> <code style="background: #f0f9ff; padding: 4px 8px; border-radius: 6px; font-family: 'Courier New', monospace; color: #1e40af; font-weight: bold; border: 1px solid #3b82f6;">{survey_code}</code>
                 </div>
                 <div class="credential-item">
-                    <strong>🌐 Platform Access:</strong> <a href="http://www.saurara.org" style="color: #667eea; font-weight: 600; text-decoration: none;">www.saurara.org</a>
+                    <strong>Platform Access:</strong> <a href="http://www.saurara.org" style="color: #667eea; font-weight: 600; text-decoration: none;">www.saurara.org</a>
                 </div>
             </div>
             
             <div style="text-align: center; margin: 35px 0;">
-                <a href="http://www.saurara.org" class="button" style="font-size: 16px;">🚀 Access Platform Now</a>
+                <a href="http://www.saurara.org" class="button" style="font-size: 16px;">Access Platform Now</a>
             </div>
             
             <div class="quick-start">
-                <h3 style="color: #92400e; margin-top: 0; font-size: 18px;">📋 Quick Start Guide</h3>
+                <h3 style="color: #92400e; margin-top: 0; font-size: 18px;">Quick Start Guide</h3>
                 <ol style="color: #374151;">
                     <li><strong>Visit</strong> <a href="http://www.saurara.org" style="color: #667eea;">www.saurara.org</a></li>
                     <li><strong>Click</strong> on "Login" or "Survey Access"</li>
@@ -7317,17 +7347,17 @@ The Saurara Research Team
             </div>
             
             <div class="security-alert">
-                <h3 style="color: #c2410c; margin-top: 0; font-size: 18px;">🔒 Important Security Information</h3>
+                <h3 style="color: #c2410c; margin-top: 0; font-size: 18px;"> Important Security Information</h3>
                 <p style="margin-bottom: 0; color: #374151;"><strong>For your account security:</strong> Please change your password during your first login. Keep your credentials safe and never share them with unauthorized individuals. Your data privacy and security are our top priorities.</p>
             </div>
             
             <div style="background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%); padding: 25px; border-radius: 12px; margin: 25px 0; border-left: 5px solid #0ea5e9;">
-                <h3 style="color: #0c4a6e; margin-top: 0; font-size: 18px;">🎯 What Awaits You</h3>
+                <h3 style="color: #0c4a6e; margin-top: 0; font-size: 18px;"> What Awaits You</h3>
                 <p style="color: #374151; margin-bottom: 0;">As a member of the Saurara community, you'll receive invitations to participate in meaningful research initiatives. Your insights will contribute to understanding and improving educational and community programs worldwide. <strong>Every response makes a difference!</strong></p>
             </div>
             
             <div class="features-grid">
-                <h3 style="color: #5b21b6; margin-top: 0; font-size: 18px;">📚 Platform Features</h3>
+                <h3 style="color: #5b21b6; margin-top: 0; font-size: 18px;"> Platform Features</h3>
                 <div class="feature-item">• <strong>Personalized survey dashboard</strong> - Tailored to your profile</div>
                 <div class="feature-item">• <strong>Progress tracking</strong> - Monitor your completion status</div>
                 <div class="feature-item">• <strong>Secure data handling</strong> - Privacy protection guaranteed</div>
@@ -7336,15 +7366,15 @@ The Saurara Research Team
             </div>
             
             <div class="tips-section">
-                <h3 style="color: #065f46; margin-top: 0; font-size: 18px;">💡 Getting the Most Out of Saurara</h3>
-                <div class="tip-item">📝 Complete your profile for better survey matching</div>
-                <div class="tip-item">🎯 Respond to surveys thoughtfully and thoroughly</div>
-                <div class="tip-item">📢 Stay engaged with platform updates and announcements</div>
-                <div class="tip-item">🤝 Reach out for support whenever needed</div>
+                <h3 style="color: #065f46; margin-top: 0; font-size: 18px;">Getting the Most Out of Saurara</h3>
+                <div class="tip-item">Complete your profile for better survey matching</div>
+                <div class="tip-item">Respond to surveys thoughtfully and thoroughly</div>
+                <div class="tip-item">Stay engaged with platform updates and announcements</div>
+                <div class="tip-item">Reach out for support whenever needed</div>
             </div>
             
             <div class="support-box">
-                <h3 style="color: #1d4ed8; margin-top: 0; font-size: 18px;">🆘 Need Assistance?</h3>
+                <h3 style="color: #1d4ed8; margin-top: 0; font-size: 18px;">Need Assistance?</h3>
                 <p style="margin-bottom: 15px; color: #374151;">Our dedicated support team is here to help you succeed. Whether you have technical questions, need guidance on surveys, or want to learn more about our research initiatives, we're just a message away!</p>
                 <p style="margin-bottom: 0; color: #374151;"><strong>We're honored to have you as part of the Saurara family.</strong> Together, we're building a better understanding of education and community development globally.</p>
             </div>
@@ -7364,9 +7394,9 @@ The Saurara Research Team
                 <span class="welcome-tag">WELCOME</span>
             </div>
             <p style="margin: 15px 0 0 0; text-align: center; color: #6b7280; font-size: 14px;">
-                🌐 Platform: <a href="http://www.saurara.org" style="color: #667eea;">www.saurara.org</a> | 
-                📧 Support: <a href="mailto:support@saurara.org" style="color: #667eea;">support@saurara.org</a><br>
-                📱 Stay Connected: Follow us for updates and insights
+                Platform: <a href="http://www.saurara.org" style="color: #667eea;">www.saurara.org</a> | 
+                Support: <a href="mailto:info@saurara.org" style="color: #667eea;">info@saurara.org</a><br>
+                Stay Connected: Follow us for updates and insights
             </p>
         </div>
     </div>
@@ -10556,6 +10586,9 @@ def compare_surveys_by_template():
             'template_code': target_template.survey_code,
             'template_questions_count': len(target_questions),
             'user_id': target_response.user_id,
+            'user_name': f"{target_response.user.firstname or ''} {target_response.user.lastname or ''}".strip() if target_response.user else None,
+            'user_email': target_response.user.email if target_response.user else None,
+            'organization_id': target_response.user.organization_id if target_response.user else None,
             'organization_name': target_response.user.organization.name if target_response.user and target_response.user.organization else None,
             'organization_type': target_response.user.organization.organization_type.type if target_response.user and target_response.user.organization and target_response.user.organization.organization_type else None
         }
@@ -11467,7 +11500,7 @@ class SavedReport(db.Model):
     __tablename__ = 'saved_reports'
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
-    organization_id = db.Column(db.Integer, db.ForeignKey('organizations.id'), nullable=False)
+    organization_id = db.Column(db.Integer, db.ForeignKey('organizations.id'), nullable=True)  # Made nullable
     title = db.Column(db.String(255), nullable=False)
     content = db.Column(JSON, nullable=False)
     created_at = db.Column(db.DateTime, server_default=db.func.current_timestamp())
@@ -11537,9 +11570,17 @@ def save_report():
         if not title:
              return jsonify({'error': 'Title is required'}), 400
         
-        # Default user/org if missing (for testing)
-        if not user_id: user_id = 1
-        if not org_id: org_id = 1
+        # Require user_id
+        if not user_id:
+            return jsonify({'error': 'User ID is required'}), 400
+        
+        # If org_id not provided or invalid, try to get from user's organization
+        if not org_id or org_id == 1:
+            user = User.query.get(user_id)
+            if user and user.organization_id:
+                org_id = user.organization_id
+            else:
+                org_id = None  # Allow null organization
 
         if report_id:
             report = SavedReport.query.get(report_id)
