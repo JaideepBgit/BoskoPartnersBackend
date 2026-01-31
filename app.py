@@ -1407,7 +1407,7 @@ CORS(
         }
     },
     supports_credentials=True,
-    allow_headers=["Content-Type", "Authorization"]
+    allow_headers=["Content-Type", "Authorization", "x-user-role"]
 )
 # 1) Env-based settings
 env_user     = os.getenv("DB_USER")
@@ -1469,7 +1469,16 @@ db = SQLAlchemy(app)
 def create_tables():
     with app.app_context():
         db.create_all()
-        print("Tables created or already exist.")
+        # Seed basic roles
+        existing_roles = Role.query.all()
+        existing_role_names = {r.name for r in existing_roles}
+        required_roles = ['admin', 'user', 'manager', 'other', 'primary_contact', 'secondary_contact', 'head', 'root']
+        for r_name in required_roles:
+             if r_name not in existing_role_names:
+                 db.session.add(Role(name=r_name))
+        db.session.commit()
+        
+        print("Tables created and roles seeded.")
 
 # Define models
 class OrganizationType(db.Model):
@@ -1585,6 +1594,13 @@ class Title(db.Model):
     def __repr__(self):
         return f'<Title {self.name}>'
 
+user_roles = db.Table('user_roles',
+    db.Column('user_id', db.Integer, db.ForeignKey('users.id'), primary_key=True),
+    db.Column('role_id', db.Integer, db.ForeignKey('roles.id'), primary_key=True)
+)
+
+
+
 
 class User(db.Model):
     __tablename__ = 'users'
@@ -1593,13 +1609,15 @@ class User(db.Model):
     username = db.Column(db.String(50), unique=True, nullable=False)
     email = db.Column(db.String(100), unique=True, nullable=False)
     password = db.Column(db.String(255), nullable=False)
-    role = db.Column(db.Enum('admin', 'user', 'manager', 'other', 'head', 'root'), default='user')
+    # role = db.Column(db.Enum('admin', 'user', 'manager', 'other', 'primary_contact', 'secondary_contact', 'head', 'root'), nullable=True, default='user')
+    role_id = db.Column(db.Integer, db.ForeignKey('roles.id'), nullable=True) # Primary role ID
     firstname = db.Column(db.String(50))
     lastname = db.Column(db.String(50))
     survey_code = db.Column(db.String(36), nullable=True)  # UUID as string for user surveys
     geo_location_id = db.Column(db.Integer, db.ForeignKey('geo_locations.id'), nullable=True)
     phone = db.Column(db.String(20), nullable=True)  # Added for contact information
     title_id = db.Column(db.Integer, db.ForeignKey('titles.id'), nullable=True)  # New: references titles table
+
     created_at = db.Column(db.DateTime, server_default=db.func.current_timestamp())
     updated_at = db.Column(db.DateTime, server_default=db.func.current_timestamp(), onupdate=db.func.current_timestamp())
     
@@ -1611,6 +1629,9 @@ class User(db.Model):
     organization = db.relationship('Organization', foreign_keys=[organization_id], backref=db.backref('users', lazy=True))
     geo_location = db.relationship('GeoLocation', foreign_keys=[geo_location_id])
     title = db.relationship('Title', foreign_keys=[title_id], backref=db.backref('users', lazy=True))
+    roles = db.relationship('Role', secondary=user_roles, lazy='subquery',
+                            backref=db.backref('users_with_role', lazy=True)) # Many-to-Many
+    primary_role = db.relationship('Role', foreign_keys=[role_id]) # One-to-Many (Primary)
     
     def __repr__(self):
         return f'<User {self.username}>'
@@ -1972,12 +1993,19 @@ def get_users():
         'id': user.id,
         'username': user.username,
         'email': user.email,
-        'role': user.role,
+        'role': user.primary_role.name if user.primary_role else None,  # Primary role name
+        'role_id': user.role_id,
+        'roles': [r.name for r in (user.roles or [])], # List of all roles
         'organization_id': user.organization_id,
         'title': user.title.name if user.title else None,
-        'title_id': user.title_id
+        'title_id': user.title_id,
+        'ui_role': user.primary_role.name if user.primary_role else 'user', # Add ui_role for compatibility
+        'titles': [{'id': t.title.id, 'name': t.title.name} for t in user.organization_titles if t.title] if user.organization_titles else ([{'id': user.title.id, 'name': user.title.name}] if user.title else [])
     } for user in users]
     return jsonify(users_list)
+
+
+
 
 # Login API Endpoint
 @app.route('/api/users/login', methods=['POST'])
@@ -2008,18 +2036,94 @@ def login():
     if user.password != password:
         return jsonify({"error": "Invalid credentials"}), 401
 
-    # Signal that the login is successful (redirect to landing page on frontend)
+    # Get available roles from user_roles table (many-to-many relationship)
+    available_roles = [r.name for r in (user.roles or [])]
+    
+    # If user has no roles in user_roles, check if they have a primary role
+    if not available_roles and user.primary_role:
+        available_roles = [user.primary_role.name]
+    
+    # If still no roles, default to 'user'
+    if not available_roles:
+        available_roles = ['user']
+    
+    logger.info(f"User {user.id} ({user.username}) has available roles: {available_roles}")
+
+    # Signal that the login is successful
+    # If user has multiple roles, frontend should show role selection
+    # If user has single role, auto-select that role
     return jsonify({
         "message": "Login successful",
+        "requires_role_selection": len(available_roles) > 1,
         "data": {
             "id": user.id,
             "organization_id": user.organization_id,
             "username": user.username,
             "email": user.email,
-            "role": user.role,
-            "survey_code": user.survey_code,  # Include survey code for users
-            "title": user.title.name if user.title else None,  # Include title name
-            "title_id": user.title_id  # Include title ID
+            "available_roles": available_roles,
+            "role": available_roles[0] if len(available_roles) == 1 else None,  # Auto-select if single role
+            "role_id": user.role_id,
+            "survey_code": user.survey_code,
+            "title": user.title.name if user.title else None,
+            "title_id": user.title_id,
+            "firstname": user.firstname,
+            "lastname": user.lastname
+        }
+    }), 200
+
+
+@app.route('/api/users/select-role', methods=['POST'])
+def select_role():
+    """
+    Endpoint for user to select which role to login as.
+    Expects JSON: { "user_id": <id>, "selected_role": "<role_name>" }
+    Validates that the user actually has this role assigned.
+    """
+    data = request.get_json()
+    user_id = data.get("user_id")
+    selected_role = data.get("selected_role")
+    
+    if not user_id or not selected_role:
+        return jsonify({"error": "user_id and selected_role are required"}), 400
+    
+    # Get user
+    user = User.query.get(user_id)
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+    
+    # Get user's available roles from user_roles table
+    available_roles = [r.name for r in (user.roles or [])]
+    
+    # If user has no roles in user_roles, check primary role
+    if not available_roles and user.primary_role:
+        available_roles = [user.primary_role.name]
+    
+    # Validate that user actually has the selected role
+    if selected_role not in available_roles:
+        logger.warning(f"User {user_id} tried to select role '{selected_role}' but only has: {available_roles}")
+        return jsonify({
+            "error": f"You do not have the '{selected_role}' role assigned",
+            "available_roles": available_roles
+        }), 403
+    
+    logger.info(f"User {user_id} ({user.username}) selected role: {selected_role}")
+    
+    # Return user data with selected role
+    return jsonify({
+        "message": f"Role '{selected_role}' selected successfully",
+        "data": {
+            "id": user.id,
+            "organization_id": user.organization_id,
+            "username": user.username,
+            "email": user.email,
+            "role": selected_role,  # The selected active role
+            "available_roles": available_roles,
+            "role_id": user.role_id,
+            "survey_code": user.survey_code,
+            "title": user.title.name if user.title else None,
+            "title_id": user.title_id,
+            "firstname": user.firstname,
+            "lastname": user.lastname
         }
     }), 200
 
@@ -2030,14 +2134,23 @@ def register():
     # Generate a UUID for the survey code if role is 'user'
     survey_code = str(uuid4()) if data.get('role', 'user') == 'user' else None
     
+    # Find role object
+    # Find role object
+    role_name = data.get('role', 'user')
+    role_obj = Role.query.filter_by(name=role_name).first()
+    
     new_user = User(
       username=data['username'],
       email   =data['email'],
       password=data['password'],
-      role=data.get('role', 'user'),
+      role_id=role_obj.id if role_obj else None,
       organization_id=data['organization_id'],
       survey_code=survey_code
     )
+    
+    # Also add to user_roles
+    if role_obj:
+        new_user.roles.append(role_obj)
     db.session.add(new_user)
     db.session.commit()
     
@@ -2071,7 +2184,7 @@ def validate_survey():
         "email": user.email,
         "survey_code": user.survey_code,
         "organization_id": user.organization_id,
-        "role": user.role
+        "role": user.primary_role.name if user.primary_role else None
     }
     return jsonify({"valid": True, "survey": payload}), 200
 
@@ -2294,6 +2407,8 @@ def submit_user_details():
         db.session.rollback()
         return jsonify({"error": str(e)}), 500
 
+
+
 # Add this API endpoint to view all user details
 @app.route('/api/user-details', methods=['GET'])
 def get_all_user_details():
@@ -2314,6 +2429,88 @@ def get_all_user_details():
         })
         print(f"User Details: {detail.id}, {detail.user_id}, {detail.organization_id}, {detail.form_data}, {detail.is_submitted}")
     return jsonify(user_details_list), 200
+
+@app.route('/api/organizations/<int:organization_id>', methods=['GET'])
+def get_organization_by_id(organization_id):
+    """Retrieve an organization by ID"""
+    try:
+        org = Organization.query.get(organization_id)
+        if not org:
+             return jsonify({'error': 'Organization not found'}), 404
+             
+        return jsonify({
+            'id': org.id,
+            'name': org.name,
+            'type': org.type,
+            'organization_type': {
+                'id': org.organization_type.id,
+                'type': org.organization_type.type
+            } if org.organization_type else None,
+            'website': org.website,
+            'highest_level_of_education': org.highest_level_of_education,
+            'details': org.details,
+            # Add other fields as necessary
+        }), 200
+    except Exception as e:
+        logger.error(f"Error fetching organization {organization_id}: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/organizations/<int:organization_id>/users', methods=['GET'])
+def get_users_by_organization(organization_id):
+    """Retrieve users for a specific organization"""
+    try:
+        users = User.query.filter_by(organization_id=organization_id).all()
+        result = []
+        for user in users:
+             # Get system roles
+            try:
+                system_roles = [r.name for r in user.roles]
+            except Exception:
+                system_roles = [user.primary_role.name] if user.primary_role else []
+            
+            # Get organizational titles
+            org_titles = []
+            user_org_titles = UserOrganizationTitle.query.filter_by(user_id=user.id, organization_id=organization_id).all()
+            for ut in user_org_titles:
+                if ut.title:
+                    org_titles.append({'id': ut.title.id, 'name': ut.title.name})
+            
+            # Fallback for legacy title
+            if not org_titles and user.title:
+                org_titles.append({'id': user.title.id, 'name': user.title.name})
+
+            result.append({
+                'id': user.id,
+                'username': user.username,
+                'email': user.email,
+                'role': user.primary_role.name if user.primary_role else None,
+                'roles': system_roles,
+                'firstname': user.firstname,
+                'lastname': user.lastname,
+                'title_id': user.title_id,
+                'title': user.title.name if user.title else None,
+                'titles': org_titles
+            })
+        return jsonify(result), 200
+    except Exception as e:
+        logger.error(f"Error fetching users for organization {organization_id}: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+
+
+@app.route('/api/titles', methods=['GET'])
+def get_titles():
+    """Retrieve all available titles"""
+    try:
+        titles = Title.query.all()
+        return jsonify([{
+            'id': t.id,
+            'name': t.name
+        } for t in titles]), 200
+    except Exception as e:
+        logger.error(f"Error fetching titles: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
 
 # Add a test endpoint to verify database connectivity
 @app.route('/api/test-database', methods=['GET'])
@@ -2395,11 +2592,18 @@ def initialize_test_data():
                 username="testuser",
                 email="test@example.com",
                 password="password",
-                role="user",
+                # role="user",
                 organization_id=test_org.id,
                 firstname="Test",
                 lastname="User"
             )
+            
+            # Assign user role
+            user_role = Role.query.filter_by(name='user').first()
+            if user_role:
+                test_user.roles.append(user_role)
+                test_user.role_id = user_role.id
+                
             db.session.add(test_user)
             db.session.commit()
             
@@ -3904,13 +4108,151 @@ def get_organization_users(org_id):
             'id': user.id,
             'username': user.username,
             'email': user.email,
-            'role': user.role,
+            'role': user.primary_role.name if user.primary_role else None,
             'firstname': user.firstname,
-            'lastname': user.lastname
+            'lastname': user.lastname,
+            'is_account_holder': user.is_account_holder if hasattr(user, 'is_account_holder') else False
         }
         result.append(user_data)
     
     return jsonify(result)
+
+# Account Holder API Endpoints
+@app.route('/api/organizations/<int:org_id>/account-holders', methods=['GET'])
+def get_organization_account_holders(org_id):
+    """Get all account holders for an organization"""
+    try:
+        # Check if organization exists
+        org = Organization.query.get_or_404(org_id)
+        
+        # Get users who are account holders for this organization
+        account_holders = User.query.filter_by(organization_id=org_id, is_account_holder=True).all()
+        
+        result = []
+        for user in account_holders:
+            user_data = {
+                'id': user.id,
+                'username': user.username,
+                'email': user.email,
+                'role': user.primary_role.name if user.primary_role else None,
+                'firstname': user.firstname,
+                'lastname': user.lastname,
+                'phone': user.phone,
+                'is_account_holder': True
+            }
+            result.append(user_data)
+        
+        return jsonify(result), 200
+    except Exception as e:
+        logger.error(f"Error getting account holders for organization {org_id}: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/organizations/<int:org_id>/account-holders/<int:user_id>', methods=['PUT'])
+def update_account_holder_status(org_id, user_id):
+    """Toggle account holder status for a specific user"""
+    try:
+        # Check if organization exists
+        org = Organization.query.get_or_404(org_id)
+        
+        # Get the user and verify they belong to this organization
+        user = User.query.get_or_404(user_id)
+        
+        if user.organization_id != org_id:
+            return jsonify({'error': 'User does not belong to this organization'}), 400
+        
+        # Get the new status from request body
+        data = request.get_json()
+        is_account_holder = data.get('is_account_holder', False)
+        
+        # Update the user's account holder status
+        user.is_account_holder = is_account_holder
+        db.session.commit()
+        
+        logger.info(f"Updated account holder status for user {user_id} in organization {org_id} to {is_account_holder}")
+        
+        return jsonify({
+            'message': 'Account holder status updated successfully',
+            'user_id': user_id,
+            'is_account_holder': is_account_holder
+        }), 200
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error updating account holder status: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/organizations/<int:org_id>/account-holders', methods=['POST'])
+def add_account_holders(org_id):
+    """Add one or more account holders to an organization (can replace or append)"""
+    try:
+        # Check if organization exists
+        org = Organization.query.get_or_404(org_id)
+        
+        data = request.get_json()
+        user_ids = data.get('user_ids', [])
+        replace_all = data.get('replace_all', False)  # If True, remove existing account holders first
+        
+        if not user_ids:
+            return jsonify({'error': 'user_ids array is required'}), 400
+        
+        # If replace_all is True, remove account holder status from all existing account holders
+        if replace_all:
+            User.query.filter_by(organization_id=org_id, is_account_holder=True).update({'is_account_holder': False})
+        
+        # Add account holder status to specified users
+        updated_users = []
+        for user_id in user_ids:
+            user = User.query.get(user_id)
+            if user and user.organization_id == org_id:
+                user.is_account_holder = True
+                updated_users.append({
+                    'id': user.id,
+                    'username': user.username,
+                    'firstname': user.firstname,
+                    'lastname': user.lastname
+                })
+            else:
+                logger.warning(f"User {user_id} not found or doesn't belong to organization {org_id}")
+        
+        db.session.commit()
+        
+        logger.info(f"Updated account holders for organization {org_id}: {len(updated_users)} users")
+        
+        return jsonify({
+            'message': 'Account holders updated successfully',
+            'account_holders': updated_users
+        }), 200
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error adding account holders: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/organizations/<int:org_id>/account-holders/<int:user_id>', methods=['DELETE'])
+def remove_account_holder(org_id, user_id):
+    """Remove account holder status from a specific user"""
+    try:
+        # Check if organization exists
+        org = Organization.query.get_or_404(org_id)
+        
+        # Get the user and verify they belong to this organization
+        user = User.query.get_or_404(user_id)
+        
+        if user.organization_id != org_id:
+            return jsonify({'error': 'User does not belong to this organization'}), 400
+        
+        # Remove account holder status
+        user.is_account_holder = False
+        db.session.commit()
+        
+        logger.info(f"Removed account holder status from user {user_id} in organization {org_id}")
+        
+        return jsonify({
+            'message': 'Account holder status removed successfully',
+            'user_id': user_id
+        }), 200
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error removing account holder: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
 # Get user's associated organizations
 @app.route('/api/users/<int:user_id>/organizations', methods=['GET'])
@@ -4611,7 +4953,7 @@ def get_all_users():
             'id': user.id,
             'username': user.username,
             'email': user.email,
-            'role': user.role,
+            'role': user.primary_role.name if user.primary_role else None,
             'firstname': user.firstname,
             'lastname': user.lastname,
             'organization_id': user.organization_id,
@@ -4620,7 +4962,8 @@ def get_all_users():
         }
         
         # Add display role and organizational role info
-        if user.role == 'other':
+        user_role_name = user.primary_role.name if user.primary_role else None
+        if user_role_name == 'other':
             # Get organizational role for display
             org_role = UserOrganizationRole.query.filter_by(user_id=user.id).first()
             if org_role and org_role.role:
@@ -4630,8 +4973,8 @@ def get_all_users():
                 user_data['display_role'] = 'other'
                 user_data['ui_role'] = 'other'
         else:
-            user_data['display_role'] = user.role
-            user_data['ui_role'] = user.role
+            user_data['display_role'] = user_role_name
+            user_data['ui_role'] = user_role_name
         
         # Include template_id from survey response if available
         survey_response = SurveyResponse.query.filter_by(user_id=user.id).first()
@@ -4667,6 +5010,29 @@ def get_all_users():
             }
         
         result.append(user_data)
+        
+        # Add system roles list for multi-select
+        try:
+            user_data['roles'] = [r.name for r in user.roles]
+        except Exception as e:
+            logger.error(f"Error fetching roles for user {user.id}: {str(e)}")
+            user_data['roles'] = [user.primary_role.name] if user.primary_role else ['user']
+        
+        # Add titles list for multi-select (scoped to current organization)
+        user_data['titles'] = []
+        if user.organization_id:
+            try:
+                user_org_titles = UserOrganizationTitle.query.filter_by(user_id=user.id, organization_id=user.organization_id).all()
+                for ut in user_org_titles:
+                    if ut.title:
+                        user_data['titles'].append({'id': ut.title.id, 'name': ut.title.name})
+            except Exception as e:
+                logger.error(f"Error fetching titles for user {user.id}: {str(e)}")
+        
+        # Fallback to legacy single title if no organizational titles found but single title exists
+        if not user_data['titles'] and user.title:
+             user_data['titles'].append({'id': user.title.id, 'name': user.title.name})
+
     return jsonify(result)
 
 
@@ -4685,7 +5051,7 @@ def get_user(user_id):
         'id': user.id,
         'username': user.username,
         'email': user.email,
-        'role': user.role,
+        'role': user.primary_role.name if user.primary_role else None,
         'firstname': user.firstname,
         'lastname': user.lastname,
         'organization_id': user.organization_id,
@@ -4705,6 +5071,35 @@ def add_user():
     # Validate and clean the role
     requested_role = data.get('role', 'user')
     validated_role = validate_user_role(requested_role)
+    
+    # Get the roles list if provided (for multi-role support)
+    requested_roles = data.get('roles', [requested_role])
+    
+    # Get the current user's role from the request header (X-User-Role)
+    # This would typically come from JWT token in production
+    current_user_role = request.headers.get('X-User-Role', 'user')
+    
+    # Role permission validation
+    # Admin cannot assign 'root' role
+    # Manager cannot assign 'admin' or 'root' roles
+    # Root users can assign any role
+    restricted_roles_for_admin = ['root']
+    restricted_roles_for_manager = ['admin', 'root']
+    
+    if current_user_role == 'admin':
+        for role in requested_roles:
+            if role.lower() in [r.lower() for r in restricted_roles_for_admin]:
+                logger.warning(f"Admin user tried to assign '{role}' role which is not permitted")
+                return jsonify({
+                    "error": f"You do not have permission to assign the '{role}' role. Only root users can assign root roles."
+                }), 403
+    elif current_user_role == 'manager':
+        for role in requested_roles:
+            if role.lower() in [r.lower() for r in restricted_roles_for_manager]:
+                logger.warning(f"Manager user tried to assign '{role}' role which is not permitted")
+                return jsonify({
+                    "error": f"You do not have permission to assign the '{role}' role. Managers can only assign user and manager roles."
+                }), 403
     
     # Generate password if not provided
     user_password = data.get('password')
@@ -4935,6 +5330,31 @@ def update_user(user_id):
     logger.info(f"Full data: {data}")
     logger.info(f"================================")
     
+    # Get the current user's role from the request header (X-User-Role)
+    current_user_role = request.headers.get('X-User-Role', 'user')
+    
+    # Role permission validation for role changes
+    if 'role' in data or 'roles' in data:
+        requested_roles = data.get('roles', [data.get('role')] if data.get('role') else [])
+        
+        restricted_roles_for_admin = ['root']
+        restricted_roles_for_manager = ['admin', 'root']
+        
+        if current_user_role == 'admin':
+            for role in requested_roles:
+                if role and role.lower() in [r.lower() for r in restricted_roles_for_admin]:
+                    logger.warning(f"Admin user tried to assign '{role}' role which is not permitted")
+                    return jsonify({
+                        "error": f"You do not have permission to assign the '{role}' role. Only root users can assign root roles."
+                    }), 403
+        elif current_user_role == 'manager':
+            for role in requested_roles:
+                if role and role.lower() in [r.lower() for r in restricted_roles_for_manager]:
+                    logger.warning(f"Manager user tried to assign '{role}' role which is not permitted")
+                    return jsonify({
+                        "error": f"You do not have permission to assign the '{role}' role. Managers can only assign user and manager roles."
+                    }), 403
+    
     # Track role validation
     role_changed = False
     requested_role = None
@@ -4949,9 +5369,18 @@ def update_user(user_id):
         user.password = data['password']  # In production, this should be hashed
     if 'role' in data:
         requested_role = data['role']
-        validated_role = validate_user_role(data['role'])
-        role_changed = requested_role != validated_role
-        user.role = validated_role
+        # Lookup role object
+        role_obj = Role.query.filter_by(name=requested_role).first()
+        if role_obj:
+            validated_role = role_obj.name # Use DB name
+            role_changed = (user.primary_role.name if user.primary_role else '') != validated_role
+            user.role_id = role_obj.id
+            
+            # Also ensure it is in the roles list (maintain consistency)
+            if role_obj not in user.roles:
+                user.roles.append(role_obj)
+        else:
+             logger.warning(f"Role {requested_role} not found in DB")
     if 'firstname' in data:
         user.firstname = data['firstname']
     if 'lastname' in data:
@@ -4960,6 +5389,7 @@ def update_user(user_id):
         user.phone = data['phone']
     if 'organization_id' in data:
         user.organization_id = data['organization_id']
+
     
     # Handle template_id update - update the user's survey response template
     if 'template_id' in data and data['template_id']:
@@ -5009,7 +5439,7 @@ def update_user(user_id):
                 else:
                     # Create new survey response if none exists
                     excluded_roles = ['admin', 'root', 'primary_contact', 'secondary_contact']
-                    current_role = data.get('role', user.role)
+                    current_role = data.get('role', user.primary_role.name if user.primary_role else 'user')
                     validated_role = validate_user_role(current_role)
                     
                     if validated_role.lower() not in [role.lower() for role in excluded_roles]:
@@ -5073,47 +5503,86 @@ def update_user(user_id):
             db.session.flush()
             user.geo_location_id = geo_location.id
     
-    # Handle organizational roles if provided or if role was changed to 'other'
-    if 'roles' in data:
-        # Remove existing roles for this user
-        UserOrganizationRole.query.filter_by(user_id=user_id).delete()
-        
-        # Add new roles
-        if data['roles']:
-            for role_data in data['roles']:
-                if isinstance(role_data, dict) and 'organization_id' in role_data and 'role_type' in role_data:
-                    # Find or create the role in the Role table
-                    role_record = Role.query.filter_by(name=role_data['role_type']).first()
-                    if not role_record:
-                        role_record = Role(name=role_data['role_type'], description=f"Custom role: {role_data['role_type']}")
-                        db.session.add(role_record)
+    # Handle "roles" field
+    if 'roles' in data and isinstance(data['roles'], list):
+        roles_data = data['roles']
+        if roles_data and isinstance(roles_data[0], str):
+             # Case 1: List of role names (System Roles) - e.g. ["admin", "user"]
+            current_roles = []
+            for role_name in roles_data:
+                role = Role.query.filter_by(name=role_name).first()
+                if role:
+                    current_roles.append(role)
+            user.roles = current_roles
+            
+            # Also update the legacy single 'role'/'role_id' field for backward compatibility if needed
+            # Set primary_role to the first one or 'user'
+            if current_roles:
+                 user.primary_role = current_roles[0] 
+        elif roles_data and isinstance(roles_data[0], dict):
+             # Case 2: List of dicts (Legacy/Organizational Roles)
+            # Remove existing titles for this user
+            UserOrganizationTitle.query.filter_by(user_id=user_id).delete()
+            
+            # Add new titles
+            for role_dict in roles_data:
+                if 'organization_id' in role_dict and 'role_type' in role_dict:
+                    # Find or create the title in the Title table
+                    title_record = Title.query.filter_by(name=role_dict['role_type']).first()
+                    if not title_record:
+                        title_record = Title(name=role_dict['role_type'])
+                        db.session.add(title_record)
                         db.session.flush()
                     
-                    user_org_role = UserOrganizationRole(
+                    user_org_title = UserOrganizationTitle(
                         user_id=user_id,
-                        organization_id=role_data['organization_id'],
-                        role_id=role_record.id
+                        organization_id=role_dict['organization_id'],
+                        title_id=title_record.id
                     )
-                    db.session.add(user_org_role)
-    elif role_changed and user.organization_id:
-        # If role was changed to 'other', create organizational role automatically
-        # Remove existing roles for this user first
-        UserOrganizationRole.query.filter_by(user_id=user_id).delete()
+                    db.session.add(user_org_title)
+
+    # Handle "titles" field (List of Title IDs) - New Multi-Select Titles
+    if 'titles' in data and isinstance(data['titles'], list) and user.organization_id:
+        # Clear existing organizational titles for this user's current organization
+        # We only clear for the current organization to avoid removing titles from other orgs if multiple orgs supported later
+        UserOrganizationTitle.query.filter_by(user_id=user_id, organization_id=user.organization_id).delete()
         
-        # Find or create the role in the Role table
-        role_record = Role.query.filter_by(name=requested_role).first()
-        if not role_record:
-            role_record = Role(name=requested_role, description=f"Custom role: {requested_role}")
-            db.session.add(role_record)
+        for title_id in data['titles']:
+            # Validate title exists
+            title = Title.query.get(title_id)
+            if title:
+                user_org_title = UserOrganizationTitle(
+                    user_id=user_id,
+                    organization_id=user.organization_id,
+                    title_id=title.id
+                )
+                db.session.add(user_org_title)
+        
+        # Update primary title_id for backward compatibility
+        if data['titles']:
+            user.title_id = data['titles'][0]
+        else:
+            user.title_id = None
+
+    elif role_changed and user.organization_id and 'roles' not in data:
+        # Fallback: If role was changed to 'other' and no roles/titles payload provided, create organizational title automatically
+        # Remove existing titles for this user first
+        UserOrganizationTitle.query.filter_by(user_id=user_id).delete()
+        
+        # Find or create the title in the Title table
+        title_record = Title.query.filter_by(name=requested_role).first()
+        if not title_record:
+            title_record = Title(name=requested_role)
+            db.session.add(title_record)
             db.session.flush()
         
-        # Create the organizational role entry
-        user_org_role = UserOrganizationRole(
+        # Create the organizational title entry
+        user_org_title = UserOrganizationTitle(
             user_id=user_id,
             organization_id=user.organization_id,
-            role_id=role_record.id
+            title_id=title_record.id
         )
-        db.session.add(user_org_role)
+        db.session.add(user_org_title)
     
     db.session.commit()
     
@@ -5157,11 +5626,11 @@ def delete_user(user_id):
             db.session.delete(response)
         deleted_counts['survey_responses'] = len(survey_responses)
         
-        # 3. Delete user organizational roles
-        user_org_roles = UserOrganizationRole.query.filter_by(user_id=user_id).all()
-        for role in user_org_roles:
-            db.session.delete(role)
-        deleted_counts['user_organization_roles'] = len(user_org_roles)
+        # 3. Delete user organizational titles
+        user_org_titles = UserOrganizationTitle.query.filter_by(user_id=user_id).all()
+        for title_entry in user_org_titles:
+            db.session.delete(title_entry)
+        deleted_counts['user_organization_titles'] = len(user_org_titles)
         
         # 4. Delete user's geo location if it exists
         if user.geo_location_id:
@@ -5321,7 +5790,7 @@ def upload_users():
             
 @app.route('/api/users/role/user', methods=['GET'])
 def get_users_with_role_user():
-    users = User.query.filter_by(role='user').all()
+    users = User.query.join(User.roles).filter(Role.name == 'user').all()
     result = []
     
     for user in users:
@@ -6185,10 +6654,10 @@ def get_admin_dashboard_stats():
     """Get statistics for admin dashboard"""
     try:
         # Get total users
-        total_users = User.query.filter_by(role='user').count()
+        total_users = User.query.join(User.roles).filter(Role.name == 'user').count()
         
         # Get active users (users with survey_code)
-        active_users = User.query.filter_by(role='user').filter(User.survey_code.isnot(None)).count()
+        active_users = User.query.join(User.roles).filter(Role.name == 'user').filter(User.survey_code.isnot(None)).count()
         
         # Get completed surveys (users who have submitted user_details)
         completed_surveys = UserDetails.query.filter_by(is_submitted=True).count()
@@ -6259,6 +6728,362 @@ def get_organization_stats():
         logger.error(f"Error fetching organization stats: {str(e)}")
         logger.error(traceback.format_exc())
         return jsonify({'error': f'Failed to fetch organization stats: {str(e)}'}), 500
+
+
+# Spider Chart Metrics API Endpoints
+
+@app.route('/api/organizations/overall-metrics', methods=['GET'])
+def get_overall_organization_metrics():
+    """Get overall metrics for all organizations combined - for spider chart visualization"""
+    try:
+        # Get all organizations
+        all_organizations = Organization.query.all()
+        total_organizations = len(all_organizations)
+        
+        # Get total users across all organizations
+        total_users = User.query.count()
+        
+        # Get users with 'user' role
+        try:
+            user_role_count = User.query.join(User.roles).filter(Role.name == 'user').count()
+        except:
+            user_role_count = total_users
+        
+        # Calculate overall survey completion
+        completed_surveys = 0
+        try:
+            completed_surveys = UserDetails.query.filter_by(is_submitted=True).count()
+        except:
+            pass
+        
+        try:
+            survey_responses = SurveyResponse.query.filter_by(status='submitted').count()
+            completed_surveys = max(completed_surveys, survey_responses)
+        except:
+            pass
+        
+        # Survey completion rate (0-100)
+        survey_completion = min((completed_surveys / max(total_users, 1)) * 100, 100) if total_users > 0 else 0
+        
+        # User count metric (normalized - assuming 500 users = 100%)
+        user_count_metric = min((total_users / 500) * 100, 100)
+        
+        # Calculate active engagement (users with survey_code)
+        try:
+            active_users = User.query.filter(User.survey_code.isnot(None)).count()
+        except:
+            active_users = int(total_users * 0.6)
+        
+        active_engagement = min((active_users / max(total_users, 1)) * 100, 100) if total_users > 0 else 0
+        
+        # Calculate geographic reach (organizations with complete location data)
+        orgs_with_location = 0
+        for org in all_organizations:
+            if org.geo_location and (org.geo_location.city or org.geo_location.country):
+                orgs_with_location += 1
+        
+        geographic_reach = min((orgs_with_location / max(total_organizations, 1)) * 100, 100) if total_organizations > 0 else 0
+        
+        # Calculate affiliation strength (orgs with affiliations)
+        orgs_with_affiliations = 0
+        for org in all_organizations:
+            has_affiliation = (
+                org.denomination_id or 
+                org.accreditation_body_id or 
+                org.umbrella_association_id or
+                getattr(org, 'affiliation_validation', None)
+            )
+            if has_affiliation:
+                orgs_with_affiliations += 1
+        
+        affiliation_strength = min((orgs_with_affiliations / max(total_organizations, 1)) * 100, 100) if total_organizations > 0 else 0
+        
+        # Calculate data quality (orgs with complete profiles)
+        orgs_with_complete_data = 0
+        for org in all_organizations:
+            completeness = 0
+            if org.name: completeness += 1
+            if org.type or org.organization_type: completeness += 1
+            if org.website: completeness += 1
+            if org.geo_location and org.geo_location.city: completeness += 1
+            if org.primary_contact_id: completeness += 1
+            
+            if completeness >= 3:  # At least 3 out of 5 fields
+                orgs_with_complete_data += 1
+        
+        data_quality = min((orgs_with_complete_data / max(total_organizations, 1)) * 100, 100) if total_organizations > 0 else 0
+        
+        metrics = {
+            'user_count': round(user_count_metric, 1),
+            'survey_completion': round(survey_completion, 1),
+            'active_engagement': round(active_engagement, 1),
+            'geographic_reach': round(geographic_reach, 1),
+            'affiliation_strength': round(affiliation_strength, 1),
+            'data_quality': round(data_quality, 1)
+        }
+        
+        logger.info(f"Overall organization metrics: {metrics}")
+        return jsonify(metrics), 200
+        
+    except Exception as e:
+        logger.error(f"Error fetching overall organization metrics: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': f'Failed to fetch overall organization metrics: {str(e)}'}), 500
+
+
+@app.route('/api/organization/<int:org_id>/metrics', methods=['GET'])
+def get_organization_metrics(org_id):
+    """Get detailed metrics for organization spider chart visualization"""
+    try:
+        org = Organization.query.get(org_id)
+        if not org:
+            return jsonify({'error': 'Organization not found'}), 404
+        
+        # Count total users in this organization
+        total_users = User.query.filter_by(organization_id=org_id).count()
+        
+        # Count users with 'user' role specifically
+        user_role_users = User.query.join(User.roles).filter(
+            User.organization_id == org_id,
+            Role.name == 'user'
+        ).count() if hasattr(User, 'roles') else total_users
+        
+        # Calculate survey completion metrics
+        completed_surveys = 0
+        total_surveys_assigned = 0
+        
+        # Check for UserDetails submissions
+        try:
+            completed_count = db.session.query(UserDetails).join(User).filter(
+                UserDetails.is_submitted == True,
+                User.organization_id == org_id
+            ).count()
+            completed_surveys = completed_count
+        except:
+            pass
+        
+        # Check for SurveyResponse submissions
+        try:
+            survey_responses = db.session.query(SurveyResponse).join(User).filter(
+                User.organization_id == org_id
+            ).all()
+            total_surveys_assigned = len(survey_responses)
+            completed_surveys = max(completed_surveys, len([r for r in survey_responses if r.status == 'submitted']))
+        except:
+            pass
+        
+        # Calculate survey completion rate (0-100)
+        survey_completion = 0
+        if total_users > 0:
+            survey_completion = min((completed_surveys / total_users) * 100, 100)
+        
+        # Calculate user count metric (normalized to 0-100, assuming 50 users = 100%)
+        user_count_metric = min((total_users / 50) * 100, 100)
+        
+        # Calculate active engagement (users who have any activity)
+        active_users = 0
+        try:
+            users_with_survey_code = User.query.filter(
+                User.organization_id == org_id,
+                User.survey_code.isnot(None)
+            ).count()
+            active_users = users_with_survey_code
+        except:
+            active_users = int(total_users * 0.6)  # Estimate
+        
+        active_engagement = min((active_users / max(total_users, 1)) * 100, 100) if total_users > 0 else 0
+        
+        # Calculate geographic reach based on location data completeness
+        geographic_reach = 0
+        if org.geo_location:
+            geo = org.geo_location
+            if geo.continent:
+                geographic_reach += 20
+            if geo.country:
+                geographic_reach += 20
+            if geo.region:
+                geographic_reach += 20
+            if geo.province:
+                geographic_reach += 20
+            if geo.city:
+                geographic_reach += 20
+        
+        # Calculate affiliation strength
+        affiliation_strength = 0
+        if org.denomination_id or getattr(org, 'denomination_affiliation', None):
+            affiliation_strength += 25
+        if org.accreditation_body_id or getattr(org, 'accreditation_status_or_body', None):
+            affiliation_strength += 25
+        if org.umbrella_association_id or getattr(org, 'umbrella_association_membership', None):
+            affiliation_strength += 25
+        if getattr(org, 'affiliation_validation', None):
+            affiliation_strength += 25
+        
+        # Calculate data quality (completeness of organization profile)
+        data_quality = 0
+        if org.name:
+            data_quality += 15
+        if org.type or org.organization_type:
+            data_quality += 15
+        if org.website:
+            data_quality += 15
+        if org.geo_location and org.geo_location.city:
+            data_quality += 15
+        if getattr(org, 'head_name', None) or getattr(org, 'head_email', None):
+            data_quality += 20
+        if org.primary_contact_id:
+            data_quality += 20
+        data_quality = min(data_quality, 100)
+        
+        metrics = {
+            'user_count': round(user_count_metric, 1),
+            'survey_completion': round(survey_completion, 1),
+            'active_engagement': round(active_engagement, 1),
+            'geographic_reach': round(geographic_reach, 1),
+            'affiliation_strength': round(affiliation_strength, 1),
+            'data_quality': round(data_quality, 1)
+        }
+        
+        logger.info(f"Organization {org_id} metrics: {metrics}")
+        return jsonify(metrics), 200
+        
+    except Exception as e:
+        logger.error(f"Error fetching organization metrics: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': f'Failed to fetch organization metrics: {str(e)}'}), 500
+
+
+@app.route('/api/user/<int:user_id>/metrics', methods=['GET'])
+def get_user_metrics(user_id):
+    """Get detailed metrics for user spider chart visualization"""
+    try:
+        user = User.query.get(user_id)
+        if not user:
+            return jsonify({'error': 'User not found'}), 404
+        
+        # Calculate profile completeness
+        profile_completeness = 0
+        if user.username:
+            profile_completeness += 10
+        if user.email:
+            profile_completeness += 15
+        if user.firstname:
+            profile_completeness += 15
+        if user.lastname:
+            profile_completeness += 15
+        if getattr(user, 'phone', None):
+            profile_completeness += 15
+        if user.geo_location and user.geo_location.city:
+            profile_completeness += 15
+        if user.organization_id:
+            profile_completeness += 15
+        profile_completeness = min(profile_completeness, 100)
+        
+        # Calculate survey participation
+        survey_participation = 0
+        surveys_completed = 0
+        
+        # Check UserDetails submissions
+        try:
+            user_details = UserDetails.query.filter_by(user_id=user_id, is_submitted=True).first()
+            if user_details:
+                surveys_completed += 1
+        except:
+            pass
+        
+        # Check SurveyResponse submissions
+        try:
+            survey_responses = SurveyResponse.query.filter_by(user_id=user_id).all()
+            completed_responses = len([r for r in survey_responses if r.status == 'submitted'])
+            surveys_completed = max(surveys_completed, completed_responses)
+        except:
+            pass
+        
+        # Normalize to 0-100 (assuming 5 surveys = 100%)
+        survey_participation = min((surveys_completed / 5) * 100, 100)
+        
+        # Calculate response quality based on answer completeness
+        response_quality = 50  # Default baseline
+        try:
+            # Check if user has detailed answers
+            responses = SurveyResponse.query.filter_by(user_id=user_id, status='submitted').all()
+            if responses:
+                total_answers = 0
+                for response in responses:
+                    if response.answers:
+                        total_answers += len(response.answers)
+                # More answers = higher quality (assuming 50 answers = 100%)
+                response_quality = min((total_answers / 50) * 100, 100)
+        except:
+            pass
+        
+        # Calculate engagement score
+        engagement_score = 30  # Base engagement
+        if user.survey_code:
+            engagement_score += 20
+        if surveys_completed > 0:
+            engagement_score += 30
+        if user.organization_id:
+            engagement_score += 20
+        engagement_score = min(engagement_score, 100)
+        
+        # Calculate activity level based on recent activity
+        activity_level = 40  # Default activity
+        try:
+            # Check for recent survey responses
+            from datetime import datetime, timedelta
+            recent_date = datetime.utcnow() - timedelta(days=30)
+            recent_responses = SurveyResponse.query.filter(
+                SurveyResponse.user_id == user_id,
+                SurveyResponse.updated_at >= recent_date
+            ).count()
+            if recent_responses > 0:
+                activity_level = min(60 + (recent_responses * 20), 100)
+            
+            # Check user creation date for new users
+            if hasattr(user, 'created_at') and user.created_at:
+                days_since_creation = (datetime.utcnow() - user.created_at).days
+                if days_since_creation < 7:
+                    activity_level = max(activity_level, 80)  # New users are considered active
+        except:
+            pass
+        
+        # Calculate timeliness (how quickly user completes assigned tasks)
+        timeliness = 50  # Default timeliness
+        try:
+            responses = SurveyResponse.query.filter_by(user_id=user_id).all()
+            if responses:
+                on_time = 0
+                total_with_deadline = 0
+                for r in responses:
+                    if r.end_date and r.updated_at:
+                        total_with_deadline += 1
+                        if r.updated_at <= r.end_date:
+                            on_time += 1
+                if total_with_deadline > 0:
+                    timeliness = (on_time / total_with_deadline) * 100
+            elif surveys_completed > 0:
+                timeliness = 70  # Completed surveys = reasonable timeliness
+        except:
+            pass
+        
+        metrics = {
+            'profile_completeness': round(profile_completeness, 1),
+            'survey_participation': round(survey_participation, 1),
+            'response_quality': round(response_quality, 1),
+            'engagement_score': round(engagement_score, 1),
+            'activity_level': round(activity_level, 1),
+            'timeliness': round(timeliness, 1)
+        }
+        
+        logger.info(f"User {user_id} metrics: {metrics}")
+        return jsonify(metrics), 200
+        
+    except Exception as e:
+        logger.error(f"Error fetching user metrics: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': f'Failed to fetch user metrics: {str(e)}'}), 500
+
 
 # Email API Endpoints
 @app.route('/api/send-welcome-email', methods=['POST'])
@@ -7055,8 +7880,8 @@ def get_users_with_pending_surveys():
     """Get all users who have not completed their surveys yet (for reminder emails)"""
     try:
         # Get users with role 'user' who have survey codes but haven't submitted user details
-        users_query = db.session.query(User).filter(
-            User.role == 'user',
+        users_query = db.session.query(User).join(User.roles).filter(
+            Role.name == 'user',
             User.survey_code.isnot(None)
         ).outerjoin(UserDetails, User.id == UserDetails.user_id).filter(
             db.or_(
@@ -10968,12 +11793,19 @@ def approve_contact_referral(referral_id):
         new_user = User(
             username=username,
             email=referral.email,
-            ui_role=data.get('ui_role', 'user'),
+            # ui_role=data.get('ui_role', 'user'),
             firstname=referral.first_name,
             lastname=referral.last_name,
             phone=referral.full_phone,
             organization_id=organization_id
         )
+        
+        # Assign role
+        role_name = data.get('ui_role', 'user')
+        user_role = Role.query.filter_by(name=role_name).first()
+        if user_role:
+            new_user.roles.append(user_role)
+            new_user.role_id = user_role.id
         new_user.set_password(password)
         db.session.add(new_user)
         db.session.flush()
@@ -11607,6 +12439,57 @@ def save_report():
         logger.error(f"Error saving report: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/users/<int:user_id>/roles', methods=['PUT'])
+def update_user_roles(user_id):
+    """
+    Update roles for a user.
+    Expects JSON: { "roles": ["user", "manager"] }
+    """
+    user = User.query.get_or_404(user_id)
+    data = request.get_json()
+    
+    if 'roles' in data:
+        new_role_names = data['roles']
+        if isinstance(new_role_names, list):
+            # Clear existing roles
+            user.roles = []
+            for r_name in new_role_names:
+                r_obj = Role.query.filter_by(name=r_name).first()
+                if r_obj:
+                    user.roles.append(r_obj)
+    
+        # Sync primary role for backward compatibility
+        current_roles = [r.name for r in user.roles]
+        
+        # Determine new primary role based on hierarchy or selection
+        new_primary = None
+        if 'manager' in current_roles:
+            new_primary = 'manager'
+        elif 'admin' in current_roles:
+            new_primary = 'admin'
+        elif 'user' in current_roles:
+            new_primary = 'user'
+        elif current_roles:
+            new_primary = current_roles[0]
+            
+        if new_primary:
+            p_role = Role.query.filter_by(name=new_primary).first()
+            if p_role:
+                user.role_id = p_role.id
+
+        try:
+            db.session.commit()
+            return jsonify({
+                "message": "Roles updated successfully",
+                "roles": [r.name for r in user.roles],
+                "primary_role": user.primary_role.name if user.primary_role else None
+            }), 200
+        except Exception as e:
+            db.session.rollback()
+            return jsonify({"error": str(e)}), 500
+
+    return jsonify({"error": "No roles provided"}), 400
+
 @app.route('/api/reports/<int:report_id>', methods=['DELETE'])
 def delete_report(report_id):
     try:
@@ -11617,6 +12500,7 @@ def delete_report(report_id):
     except Exception as e:
         db.session.rollback()
         return jsonify({'error': str(e)}), 500
+
 
 # ============================================================================
 # RAG (Retrieval-Augmented Generation) Endpoint
