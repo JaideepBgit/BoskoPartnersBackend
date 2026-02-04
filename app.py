@@ -10342,7 +10342,7 @@ def geocode_address_google(address):
             logger.error("❌ REACT_APP_GOOGLE_MAPS_API_KEY not found in environment variables")
             return None
             
-        logger.info(f"🔍 Geocoding address: {address}")
+        logger.info(f" Geocoding address: {address}")
         
         params = {
             'address': address.strip(),
