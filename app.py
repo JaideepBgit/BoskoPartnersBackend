@@ -11727,6 +11727,7 @@ def approve_contact_referral(referral_id):
             }), 400
         
         organization_id = None
+        organization_name = None
         
         # Handle organization creation or selection
         if data.get('create_organization', False):
@@ -11744,18 +11745,32 @@ def approve_contact_referral(referral_id):
             existing_org = Organization.query.filter_by(name=org_name).first()
             if existing_org:
                 organization_id = existing_org.id
+                organization_name = existing_org.name
                 logger.info(f"Using existing organization: {org_name} (ID: {organization_id})")
             else:
-                # Create geo_location if address provided
+                # Create geo_location if address provided with geocoding
                 geo_location_id = None
                 if referral.physical_address or referral.country:
+                    # Prepare address components for geocoding
+                    address_components = {
+                        'address_line1': referral.physical_address,
+                        'country': referral.country
+                    }
+                    
+                    # Attempt to geocode the address
+                    latitude, longitude = geocode_address(address_components)
+                    
                     geo_location = GeoLocation(
+                        which='organization',
                         country=referral.country,
-                        address_line1=referral.physical_address
+                        address_line1=referral.physical_address,
+                        latitude=latitude if latitude else 0,
+                        longitude=longitude if longitude else 0
                     )
                     db.session.add(geo_location)
                     db.session.flush()
                     geo_location_id = geo_location.id
+                    logger.info(f"Created GeoLocation for organization: ID={geo_location_id}, lat={latitude}, lng={longitude}")
                 
                 # Create new organization
                 new_org = Organization(
@@ -11766,6 +11781,7 @@ def approve_contact_referral(referral_id):
                 db.session.add(new_org)
                 db.session.flush()
                 organization_id = new_org.id
+                organization_name = new_org.name
                 logger.info(f"Created new organization: {org_name} (ID: {organization_id})")
         else:
             # Use existing organization
@@ -11775,6 +11791,8 @@ def approve_contact_referral(referral_id):
                     'success': False,
                     'error': 'Organization ID is required when not creating new organization'
                 }), 400
+            org = Organization.query.get(organization_id)
+            organization_name = org.name if org else None
         
         # Generate username from email
         username = referral.email.split('@')[0]
@@ -11789,15 +11807,64 @@ def approve_contact_referral(referral_id):
         import string
         password = ''.join(random.choices(string.ascii_letters + string.digits, k=12))
         
-        # Create user
+        # Generate survey code
+        survey_code = str(uuid.uuid4())[:8].upper()
+        
+        # Handle title - look up or create the title
+        title_id = None
+        if referral.title:
+            # Try to find existing title (case-insensitive)
+            existing_title = Title.query.filter(
+                db.func.lower(Title.name) == referral.title.lower()
+            ).first()
+            
+            if existing_title:
+                title_id = existing_title.id
+                logger.info(f"Found existing title: {existing_title.name} (ID: {title_id})")
+            else:
+                # Create new title
+                new_title = Title(name=referral.title.strip())
+                db.session.add(new_title)
+                db.session.flush()
+                title_id = new_title.id
+                logger.info(f"Created new title: {referral.title} (ID: {title_id})")
+        
+        # Create user geo_location if address provided
+        user_geo_location_id = None
+        if referral.physical_address or referral.country:
+            # Prepare address components for geocoding
+            address_components = {
+                'address_line1': referral.physical_address,
+                'country': referral.country
+            }
+            
+            # Attempt to geocode the address
+            latitude, longitude = geocode_address(address_components)
+            
+            user_geo_location = GeoLocation(
+                which='user',
+                country=referral.country,
+                address_line1=referral.physical_address,
+                latitude=latitude if latitude else 0,
+                longitude=longitude if longitude else 0
+            )
+            db.session.add(user_geo_location)
+            db.session.flush()
+            user_geo_location_id = user_geo_location.id
+            logger.info(f"Created GeoLocation for user: ID={user_geo_location_id}, lat={latitude}, lng={longitude}")
+        
+        # Create user with all fields
         new_user = User(
             username=username,
             email=referral.email,
-            # ui_role=data.get('ui_role', 'user'),
+            password=password,
             firstname=referral.first_name,
             lastname=referral.last_name,
             phone=referral.full_phone,
-            organization_id=organization_id
+            organization_id=organization_id,
+            title_id=title_id,
+            geo_location_id=user_geo_location_id,
+            survey_code=survey_code
         )
         
         # Assign role
@@ -11806,7 +11873,6 @@ def approve_contact_referral(referral_id):
         if user_role:
             new_user.roles.append(user_role)
             new_user.role_id = user_role.id
-        new_user.set_password(password)
         db.session.add(new_user)
         db.session.flush()
         
@@ -11816,7 +11882,8 @@ def approve_contact_referral(referral_id):
             survey_response = SurveyResponse(
                 user_id=new_user.id,
                 template_id=template_id,
-                status='pending'
+                status='pending',
+                answers={}
             )
             db.session.add(survey_response)
         
@@ -11827,10 +11894,21 @@ def approve_contact_referral(referral_id):
         db.session.commit()
         
         # Send welcome email if requested
+        email_sent = False
         if data.get('send_welcome_email', False):
             try:
-                # TODO: Implement email sending logic here
-                logger.info(f"Welcome email would be sent to {new_user.email}")
+                email_result = send_welcome_email_smtp(
+                    to_email=new_user.email,
+                    username=new_user.username,
+                    password=password,
+                    firstname=new_user.firstname,
+                    survey_code=survey_code
+                )
+                email_sent = email_result.get('success', False)
+                if email_sent:
+                    logger.info(f"Welcome email sent successfully to {new_user.email}")
+                else:
+                    logger.warning(f"Failed to send welcome email to {new_user.email}: {email_result.get('error')}")
             except Exception as email_error:
                 logger.error(f"Error sending welcome email: {str(email_error)}")
         
@@ -11841,9 +11919,13 @@ def approve_contact_referral(referral_id):
                 'id': new_user.id,
                 'username': new_user.username,
                 'email': new_user.email,
-                'organization_id': organization_id
+                'organization_id': organization_id,
+                'organization_name': organization_name,
+                'title': referral.title,
+                'survey_code': survey_code
             },
-            'password': password  # Return password for admin to share with user
+            'password': password,  # Return password for admin to share with user
+            'email_sent': email_sent
         }), 201
         
     except Exception as e:
