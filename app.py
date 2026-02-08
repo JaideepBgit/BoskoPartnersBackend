@@ -9609,8 +9609,15 @@ def assign_survey_to_user():
 def get_user_survey_assignments(user_id):
     """Get all survey assignments for a specific user"""
     try:
+        logger.info(f"Fetching survey assignments for user_id: {user_id}")
+        
         # Verify user exists and get organization information
-        user = User.query.get_or_404(user_id)
+        user = User.query.get(user_id)
+        if not user:
+            logger.error(f"User {user_id} not found")
+            return jsonify({'error': f'User with ID {user_id} not found'}), 404
+        
+        logger.info(f"Found user: {user.username}, organization_id: {user.organization_id}")
         
         # Get organization name if user has an organization
         organization_type = "Survey"  # Default
@@ -9621,10 +9628,10 @@ def get_user_survey_assignments(user_id):
         
         # Get all survey responses for this user with eager loading of relationships
         assignments = db.session.query(SurveyResponse)\
-            .options(db.joinedload(SurveyResponse.template)\
+            .options(joinedload(SurveyResponse.template)\
                       .joinedload(SurveyTemplate.version))\
             .filter_by(user_id=user_id).all()
-        logger.info(f"orgniazation_type: {organization_type}")
+        logger.info(f"organization_type: {organization_type}")
         logger.info(f"Found {len(assignments)} assignments for user {user_id}")
         
         result = []
@@ -9661,6 +9668,7 @@ def get_user_survey_assignments(user_id):
                 logger.info(f"Added assignment {assignment.id} with template name: {template_name}")
             except Exception as inner_e:
                 logger.error(f"Error processing assignment {assignment.id}: {str(inner_e)}")
+                logger.error(f"Exception traceback: {traceback.format_exc()}")
                 continue
         
         response_data = {
@@ -9677,6 +9685,7 @@ def get_user_survey_assignments(user_id):
         
     except Exception as e:
         logger.error(f"Error getting user survey assignments: {str(e)}")
+        logger.error(f"Exception traceback: {traceback.format_exc()}")
         return jsonify({'error': f'Failed to get user survey assignments: {str(e)}'}), 500
 
 @app.route('/api/users/<int:user_id>/survey-assignments/<int:assignment_id>', methods=['DELETE', 'OPTIONS'])
@@ -9690,8 +9699,13 @@ def remove_survey_assignment(user_id, assignment_id):
         return response, 200
     
     try:
+        logger.info(f"Removing survey assignment {assignment_id} for user {user_id}")
+        
         # Verify user exists
-        user = User.query.get_or_404(user_id)
+        user = User.query.get(user_id)
+        if not user:
+            logger.error(f"User {user_id} not found")
+            return jsonify({'error': f'User with ID {user_id} not found'}), 404
         
         # Find the survey response (assignment) for this user and assignment ID
         assignment = SurveyResponse.query.filter_by(
