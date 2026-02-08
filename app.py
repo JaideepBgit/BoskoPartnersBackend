@@ -2827,6 +2827,46 @@ def get_templates():
         "created_at": t.created_at
     } for t in templates]), 200
 
+@app.route('/api/organizations/<int:organization_id>/survey-templates', methods=['GET'])
+def get_organization_survey_templates(organization_id):
+    """
+    Get survey templates available for a specific organization.
+    This checks survey_template_versions to find which versions are assigned to the organization,
+    then returns the templates from those versions.
+    """
+    try:
+        # First, find all template versions for this organization
+        template_versions = SurveyTemplateVersion.query.filter_by(organization_id=organization_id).all()
+        
+        if not template_versions:
+            logger.info(f"No template versions found for organization {organization_id}")
+            return jsonify([]), 200
+        
+        version_ids = [v.id for v in template_versions]
+        
+        # Get all templates that belong to these versions
+        templates = SurveyTemplate.query.filter(SurveyTemplate.version_id.in_(version_ids)).all()
+        
+        result = []
+        for t in templates:
+            result.append({
+                "id": t.id,
+                "version_id": t.version_id,
+                "version_name": t.version.name if t.version else "Default",
+                "survey_code": t.survey_code,
+                "organization_id": organization_id,
+                "created_at": t.created_at.isoformat() if t.created_at else None
+            })
+        
+        logger.info(f"Found {len(result)} templates for organization {organization_id}")
+        return jsonify(result), 200
+        
+    except Exception as e:
+        logger.error(f"Error fetching templates for organization {organization_id}: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': f'Failed to fetch templates: {str(e)}'}), 500
+
+
 @app.route('/api/survey-templates/available', methods=['GET'])
 def get_available_survey_templates():
     """Get all available survey templates with complete information for users"""
