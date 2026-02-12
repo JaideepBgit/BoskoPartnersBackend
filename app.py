@@ -1673,6 +1673,7 @@ class SurveyTemplate(db.Model):
     __tablename__ = 'survey_templates'
     id = db.Column(db.Integer, primary_key=True)
     version_id = db.Column(db.Integer, db.ForeignKey('survey_template_versions.id'), nullable=False)
+    title_id = db.Column(db.Integer, db.ForeignKey('titles.id'), nullable=True)
     survey_code = db.Column(db.String(100), nullable=False, unique=True)
     questions = db.Column(JSON, nullable=False)
     sections = db.Column(JSON, nullable=True)  # Added sections column
@@ -1682,6 +1683,7 @@ class SurveyTemplate(db.Model):
     
     # Relationships
     version = db.relationship('SurveyTemplateVersion', backref=db.backref('templates', lazy=True))
+    title = db.relationship('Title', foreign_keys=[title_id], backref=db.backref('survey_templates', lazy=True))
     
     def __repr__(self):
         return f'<SurveyTemplate {self.survey_code}>'    
@@ -1804,8 +1806,7 @@ class UserOrganizationTitle(db.Model):
         return f'<UserOrganizationTitle user_id={self.user_id} org_id={self.organization_id} title_id={self.title_id}>'
 
 
-# Keep alias for backward compatibility with existing code
-UserOrganizationRole = UserOrganizationTitle
+# Legacy alias removed - use UserOrganizationTitle directly
 
 """
 FIXED - Survey model with unique backref name to avoid conflicts:
@@ -2862,6 +2863,10 @@ def get_templates():
         "version_id": t.version_id,
         "version_name": t.version.name if t.version else "Default",
         "survey_code": t.survey_code,
+        "title_id": t.title_id,
+        "title_name": t.title.name if t.title else None,
+        "organization_id": t.version.organization_id if t.version else None,
+        "organization_name": t.version.organization.name if t.version and t.version.organization else None,
         "created_at": t.created_at
     } for t in templates]), 200
 
@@ -2892,6 +2897,8 @@ def get_organization_survey_templates(organization_id):
                 "version_id": t.version_id,
                 "version_name": t.version.name if t.version else "Default",
                 "survey_code": t.survey_code,
+                "title_id": t.title_id,
+                "title_name": t.title.name if t.title else None,
                 "organization_id": organization_id,
                 "created_at": t.created_at.isoformat() if t.created_at else None
             })
@@ -2988,17 +2995,35 @@ def add_template():
             break
         survey_code = f"{original_survey_code}_{counter}"
         counter += 1
+    
+    # Handle title_id - can be an existing ID or a new title name
+    title_id = data.get('title_id')
+    new_title_name = data.get('new_title_name', '').strip()
+    
+    if new_title_name and not title_id:
+        existing_title = Title.query.filter_by(name=new_title_name).first()
+        if existing_title:
+            title_id = existing_title.id
+        else:
+            new_title = Title(name=new_title_name)
+            db.session.add(new_title)
+            db.session.flush()
+            title_id = new_title.id
+            logger.info(f"Created new title '{new_title_name}' with ID: {title_id}")
         
     template = SurveyTemplate(
         version_id=data['version_id'],
         survey_code=survey_code,
         questions=data['questions'],
+        title_id=title_id,
     )
     db.session.add(template)
     db.session.commit()
     return jsonify({
         'id': template.id,
-        'survey_code': template.survey_code
+        'survey_code': template.survey_code,
+        'title_id': template.title_id,
+        'title_name': template.title.name if template.title else None
     }), 201
 
 @app.route('/api/templates/<int:template_id>', methods=['GET'])
@@ -3009,6 +3034,8 @@ def get_template(template_id):
         "version_id": template.version_id,
         "version_name": template.version.name,
         "survey_code": template.survey_code,
+        "title_id": template.title_id,
+        "title_name": template.title.name if template.title else None,
         "questions": template.questions,
         "sections": template.sections,
         "created_at": template.created_at
@@ -3051,6 +3078,12 @@ def update_template(template_id):
                 question['id'] = f"q_{i}_{int(time.time())}"
         
         template.questions = data['questions']
+        updated = True
+    
+    # Allow updating title_id
+    if 'title_id' in data:
+        logger.info(f"Updating title_id for template {template_id} to: {data['title_id']}")
+        template.title_id = data['title_id']
         updated = True
     
     if updated:
@@ -4105,11 +4138,11 @@ def delete_organization(org_id):
                 db.session.delete(detail)
             deleted_counts['user_details'] += len(user_details)
             
-            # Delete user organizational roles
-            user_org_roles = UserOrganizationRole.query.filter_by(user_id=user.id).all()
-            for role in user_org_roles:
-                db.session.delete(role)
-            deleted_counts['user_organization_roles'] += len(user_org_roles)
+            # Delete user organizational titles
+            user_org_titles = UserOrganizationTitle.query.filter_by(user_id=user.id).all()
+            for title_entry in user_org_titles:
+                db.session.delete(title_entry)
+            deleted_counts['user_organization_titles'] += len(user_org_titles)
             
             # Delete user's geo location if it exists
             if user.geo_location_id:
@@ -4377,11 +4410,11 @@ def get_user_organizations(user_id):
                     'is_primary': True
                 })
         
-        # Get additional organizations through user_organization_roles
+        # Get additional organizations through user_organization_titles
         additional_orgs = db.session.query(Organization).join(
-            UserOrganizationRole, Organization.id == UserOrganizationRole.organization_id
+            UserOrganizationTitle, Organization.id == UserOrganizationTitle.organization_id
         ).filter(
-            UserOrganizationRole.user_id == user_id,
+            UserOrganizationTitle.user_id == user_id,
             Organization.id != user.organization_id  # Exclude primary org to avoid duplicates
         ).all()
         
@@ -4614,13 +4647,13 @@ def update_organization_email_service_config(org_id):
         logger.error(f"Error updating email service config for organization {org_id}: {str(e)}")
         return jsonify({'error': f'Failed to update email service config: {str(e)}'}), 500
 
-# User Organizational Roles API Endpoints
-@app.route('/api/user-organizational-roles', methods=['POST'])
-def add_user_organizational_role():
-    #Add a role for a user within an organization
+# User Organizational Titles API Endpoints
+@app.route('/api/user-organizational-titles', methods=['POST'])
+def add_user_organizational_title():
+    #Add a title for a user within an organization
     try:
         data = request.get_json()
-        logger.info(f"Adding user organizational role with data: {data}")
+        logger.info(f"Adding user organizational title with data: {data}")
         
         required_fields = ['user_id', 'organization_id', 'role_name']
         for field in required_fields:
@@ -4637,141 +4670,135 @@ def add_user_organizational_role():
         if not org:
             return jsonify({'error': 'Organization not found'}), 404
         
-        # Find or create the role
-        role_name = data['role_name'].strip().lower()
-        role = Role.query.filter_by(name=role_name).first()
-        if not role:
-            # Create new role if it doesn't exist
-            role = Role(
-                name=role_name,
-                description=f'Role: {role_name}'
-            )
-            db.session.add(role)
-            db.session.flush()  # Get the role ID
-            logger.info(f"Created new role '{role_name}' with ID: {role.id}")
+        # Find or create the title
+        title_name = data['role_name'].strip()
+        title = Title.query.filter_by(name=title_name).first()
+        if not title:
+            # Create new title if it doesn't exist
+            title = Title(name=title_name)
+            db.session.add(title)
+            db.session.flush()
+            logger.info(f"Created new title '{title_name}' with ID: {title.id}")
         
-        # Check if this role already exists for this user and organization
-        existing_role = UserOrganizationRole.query.filter_by(
+        # Check if this title already exists for this user and organization
+        existing_title = UserOrganizationTitle.query.filter_by(
             user_id=data['user_id'],
             organization_id=data['organization_id'],
-            role_id=role.id
+            title_id=title.id
         ).first()
         
-        if existing_role:
+        if existing_title:
             return jsonify({
-                'message': 'User already has this role in the organization',
-                'id': existing_role.id
+                'message': 'User already has this title in the organization',
+                'id': existing_title.id
             }), 409
         
-        # Create new user organizational role
-        user_org_role = UserOrganizationRole(
+        # Create new user organizational title
+        user_org_title = UserOrganizationTitle(
             user_id=data['user_id'],
             organization_id=data['organization_id'],
-            role_id=role.id
+            title_id=title.id
         )
         
-        db.session.add(user_org_role)
+        db.session.add(user_org_title)
         db.session.commit()
         
-        logger.info(f"Successfully created user organizational role with ID: {user_org_role.id}")
+        logger.info(f"Successfully created user organizational title with ID: {user_org_title.id}")
         
         return jsonify({
-            'message': 'User organizational role created successfully',
-            'id': user_org_role.id,
-            'role_name': role.name
+            'message': 'User organizational title created successfully',
+            'id': user_org_title.id,
+            'title_name': title.name
         }), 201
         
     except Exception as e:
-        logger.error(f"Error adding user organizational role: {str(e)}")
+        logger.error(f"Error adding user organizational title: {str(e)}")
         logger.error(traceback.format_exc())
         db.session.rollback()
-        return jsonify({'error': f'Failed to add user organizational role: {str(e)}'}), 500
+        return jsonify({'error': f'Failed to add user organizational title: {str(e)}'}), 500
 
-@app.route('/api/users/<int:user_id>/organizational-roles', methods=['GET'])
-def get_user_organizational_roles(user_id):
-    #Get all organizational roles for a specific user
+@app.route('/api/user-organizational-titles/<int:user_id>', methods=['GET'])
+def get_user_organizational_titles(user_id):
+    #Get all organizational titles for a specific user
     try:
         # Check if user exists
         user = User.query.get(user_id)
         if not user:
             return jsonify({'error': 'User not found'}), 404
         
-        # Get all organizational roles for this user
-        user_org_roles = UserOrganizationRole.query.filter_by(user_id=user_id).all()
+        # Get all organizational titles for this user
+        user_org_titles = UserOrganizationTitle.query.filter_by(user_id=user_id).all()
         
         result = []
-        for user_role in user_org_roles:
+        for user_title in user_org_titles:
             result.append({
-                'id': user_role.id,
-                'organization_id': user_role.organization_id,
-                'role_type': user_role.role.name if user_role.role else None,  # Changed to get role name from Role table
-                'role_id': user_role.role_id,
-                'organization_name': user_role.organization.name if user_role.organization else None,
-                'created_at': user_role.created_at.isoformat() if user_role.created_at else None
+                'id': user_title.id,
+                'organization_id': user_title.organization_id,
+                'title_name': user_title.title.name if user_title.title else None,
+                'title_id': user_title.title_id,
+                'organization_name': user_title.organization.name if user_title.organization else None,
+                'created_at': user_title.created_at.isoformat() if user_title.created_at else None
             })
         
         return jsonify(result), 200
         
     except Exception as e:
-        logger.error(f"Error fetching user organizational roles: {str(e)}")
-        return jsonify({'error': f'Failed to fetch user organizational roles: {str(e)}'}), 500
+        logger.error(f"Error fetching user organizational titles: {str(e)}")
+        return jsonify({'error': f'Failed to fetch user organizational titles: {str(e)}'}), 500
 
-@app.route('/api/users/<int:user_id>/organizational-roles', methods=['PUT'])
-def update_user_organizational_roles(user_id):
-    #Update all organizational roles for a specific user
+@app.route('/api/user-organizational-titles/<int:user_id>', methods=['PUT'])
+def update_user_organizational_titles(user_id):
+    #Update all organizational titles for a specific user
     try:
         data = request.get_json()
-        logger.info(f"Updating organizational roles for user {user_id} with data: {data}")
+        logger.info(f"Updating organizational titles for user {user_id} with data: {data}")
         
         # Check if user exists
         user = User.query.get(user_id)
         if not user:
             return jsonify({'error': 'User not found'}), 404
         
-        # Remove all existing organizational roles for this user
-        UserOrganizationRole.query.filter_by(user_id=user_id).delete()
+        # Remove all existing organizational titles for this user
+        UserOrganizationTitle.query.filter_by(user_id=user_id).delete()
         
-        # Add new roles if provided
+        # Add new titles if provided
         if 'roles' in data and data['roles']:
-            for role_data in data['roles']:
-                if isinstance(role_data, dict) and 'organization_id' in role_data and 'role_type' in role_data:
+            for title_data in data['roles']:
+                if isinstance(title_data, dict) and 'organization_id' in title_data and 'title_type' in title_data:
                     # Verify organization exists
-                    org = Organization.query.get(role_data['organization_id'])
+                    org = Organization.query.get(title_data['organization_id'])
                     if not org:
-                        logger.warning(f"Organization {role_data['organization_id']} not found, skipping role")
+                        logger.warning(f"Organization {title_data['organization_id']} not found, skipping title")
                         continue
                     
-                    # Find or create the role
-                    role_name = role_data['role_type'].strip().lower()
-                    role = Role.query.filter_by(name=role_name).first()
-                    if not role:
-                        # Create new role if it doesn't exist
-                        role = Role(
-                            name=role_name,
-                            description=f'Role: {role_name}'
-                        )
-                        db.session.add(role)
-                        db.session.flush()  # Get the role ID
-                        logger.info(f"Created new role '{role_name}' with ID: {role.id}")
+                    # Find or create the title
+                    title_name = title_data['title_type'].strip()
+                    title = Title.query.filter_by(name=title_name).first()
+                    if not title:
+                        # Create new title if it doesn't exist
+                        title = Title(name=title_name)
+                        db.session.add(title)
+                        db.session.flush()
+                        logger.info(f"Created new title '{title_name}' with ID: {title.id}")
                     
-                    # Create user organizational role
-                    user_org_role = UserOrganizationRole(
+                    # Create user organizational title
+                    user_org_title = UserOrganizationTitle(
                         user_id=user_id,
-                        organization_id=role_data['organization_id'],
-                        role_id=role.id
+                        organization_id=title_data['organization_id'],
+                        title_id=title.id
                     )
-                    db.session.add(user_org_role)
+                    db.session.add(user_org_title)
         
         db.session.commit()
-        logger.info(f"Successfully updated organizational roles for user {user_id}")
+        logger.info(f"Successfully updated organizational titles for user {user_id}")
         
-        return jsonify({'message': 'User organizational roles updated successfully'}), 200
+        return jsonify({'message': 'User organizational titles updated successfully'}), 200
         
     except Exception as e:
-        logger.error(f"Error updating user organizational roles: {str(e)}")
+        logger.error(f"Error updating user organizational titles: {str(e)}")
         logger.error(traceback.format_exc())
         db.session.rollback()
-        return jsonify({'error': f'Failed to update user organizational roles: {str(e)}'}), 500
+        return jsonify({'error': f'Failed to update user organizational titles: {str(e)}'}), 500
 
 # Redefined
 @app.route('/api/template-versions/<int:version_id>', methods=['PUT'])
@@ -5039,14 +5066,14 @@ def get_all_users():
             'created_at': user.created_at.isoformat() if user.created_at else None
         }
         
-        # Add display role and organizational role info
+        # Add display role and organizational title info
         user_role_name = user.primary_role.name if user.primary_role else None
         if user_role_name == 'other':
-            # Get organizational role for display
-            org_role = UserOrganizationRole.query.filter_by(user_id=user.id).first()
-            if org_role and org_role.role:
-                user_data['display_role'] = org_role.role.name
-                user_data['ui_role'] = org_role.role.name  # For frontend compatibility
+            # Get organizational title for display
+            org_title = UserOrganizationTitle.query.filter_by(user_id=user.id).first()
+            if org_title and org_title.title:
+                user_data['display_role'] = org_title.title.name
+                user_data['ui_role'] = org_title.title.name  # For frontend compatibility
             else:
                 user_data['display_role'] = 'other'
                 user_data['ui_role'] = 'other'
@@ -5236,22 +5263,22 @@ def add_user():
         geo_location.user_id = new_user.id
         geo_location.organization_id = data.get('organization_id')
     
-    # If role was changed to 'other', create organizational role
+    # If role was changed to 'other', create organizational title
     if requested_role != validated_role and data.get('organization_id'):
-        # Find or create the role in the Role table
-        role_record = Role.query.filter_by(name=requested_role).first()
-        if not role_record:
-            role_record = Role(name=requested_role, description=f"Custom role: {requested_role}")
-            db.session.add(role_record)
+        # Find or create the title in the Title table
+        title_record = Title.query.filter_by(name=requested_role).first()
+        if not title_record:
+            title_record = Title(name=requested_role)
+            db.session.add(title_record)
             db.session.flush()
         
-        # Create the organizational role entry
-        user_org_role = UserOrganizationRole(
+        # Create the organizational title entry
+        user_org_title = UserOrganizationTitle(
             user_id=new_user.id,
             organization_id=data.get('organization_id'),
-            role_id=role_record.id
+            title_id=title_record.id
         )
-        db.session.add(user_org_role)
+        db.session.add(user_org_title)
     
     # Create survey response record automatically - for all roles EXCEPT admin/contact roles
     excluded_roles = ['admin', 'root', 'primary_contact', 'secondary_contact']
@@ -5388,7 +5415,7 @@ def add_user():
     
     # Add role validation info if the role was changed
     if requested_role != validated_role:
-        response_data['role_info'] = f"Role '{requested_role}' stored as organizational role. User role set to '{validated_role}'."
+        response_data['role_info'] = f"Role '{requested_role}' stored as organizational title. User role set to '{validated_role}'."
         response_data['requested_role'] = requested_role
         response_data['actual_role'] = validated_role
         response_data['display_role'] = requested_role  # This is what the UI should display
@@ -5598,17 +5625,17 @@ def update_user(user_id):
             if current_roles:
                  user.primary_role = current_roles[0] 
         elif roles_data and isinstance(roles_data[0], dict):
-             # Case 2: List of dicts (Legacy/Organizational Roles)
+             # Case 2: List of dicts (Legacy/Organizational Titles)
             # Remove existing titles for this user
             UserOrganizationTitle.query.filter_by(user_id=user_id).delete()
             
             # Add new titles
             for role_dict in roles_data:
-                if 'organization_id' in role_dict and 'role_type' in role_dict:
+                if 'organization_id' in role_dict and 'title_type' in role_dict:
                     # Find or create the title in the Title table
-                    title_record = Title.query.filter_by(name=role_dict['role_type']).first()
+                    title_record = Title.query.filter_by(name=role_dict['title_type']).first()
                     if not title_record:
-                        title_record = Title(name=role_dict['role_type'])
+                        title_record = Title(name=role_dict['title_type'])
                         db.session.add(title_record)
                         db.session.flush()
                     
@@ -5669,7 +5696,7 @@ def update_user(user_id):
     
     # Add role validation info if the role was changed
     if role_changed:
-        response_data['role_info'] = f"Role '{requested_role}' stored as organizational role. User role set to '{validated_role}'."
+        response_data['role_info'] = f"Role '{requested_role}' stored as organizational title. User role set to '{validated_role}'."
         response_data['requested_role'] = requested_role
         response_data['actual_role'] = validated_role
         response_data['display_role'] = requested_role  # This is what the UI should display
@@ -9510,6 +9537,24 @@ def assign_survey_to_user():
         template = SurveyTemplate.query.get(template_id)
         if not template:
             return jsonify({'error': 'Survey template not found'}), 404
+
+        # Determine the organization the template belongs to (if any). This matters because
+        # users can be assigned surveys across organizations, so we should not assume the
+        # user's organization matches the survey's organization.
+        template_org_id = None
+        template_org_name = None
+        try:
+            if getattr(template, 'version', None):
+                version = template.version
+                if getattr(version, 'organization', None):
+                    template_org_id = version.organization.id
+                    template_org_name = version.organization.name
+                elif getattr(version, 'organization_id', None):
+                    template_org_id = version.organization_id
+                    org = Organization.query.get(template_org_id) if template_org_id else None
+                    template_org_name = org.name if org else None
+        except Exception as org_lookup_error:
+            logger.warning(f"Unable to resolve template organization for template_id={template_id}: {org_lookup_error}")
         
         # Get admin info for email
         admin_user = None
@@ -9545,10 +9590,23 @@ def assign_survey_to_user():
                     results['details'].append(user_result)
                     results['failed_assignments'] += 1
                     continue
+
+                # Prevent duplicate assignments (same user + same template)
+                existing_assignment = SurveyResponse.query.filter_by(
+                    user_id=user_id,
+                    template_id=template_id
+                ).first()
+                if existing_assignment:
+                    user_result['assignment_error'] = 'Survey already assigned to this user'
+                    results['details'].append(user_result)
+                    results['failed_assignments'] += 1
+                    continue
                 
-                # Check if email service is active for user's organization
-                if user.organization_id:
-                    is_active, message = is_email_service_active_for_organization(user.organization_id)
+                # Check if email service is active for the survey's organization (preferred),
+                # falling back to the user's organization when the template is global.
+                org_id_for_email = template_org_id or user.organization_id
+                if org_id_for_email:
+                    is_active, message = is_email_service_active_for_organization(org_id_for_email)
                     if not is_active:
                         user_result['assignment_error'] = f'Email service not available for organization: {message}'
                         results['details'].append(user_result)
@@ -9574,6 +9632,23 @@ def assign_survey_to_user():
                 db.session.add(survey_response)
                 db.session.flush()  # Get the ID but don't commit yet
                 
+                # Create user_organization_titles record if template has a title
+                if getattr(template, 'title_id', None) and template_org_id:
+                    existing_uot = UserOrganizationTitle.query.filter_by(
+                        user_id=user_id,
+                        organization_id=template_org_id,
+                        title_id=template.title_id
+                    ).first()
+                    
+                    if not existing_uot:
+                        uot = UserOrganizationTitle(
+                            user_id=user_id,
+                            organization_id=template_org_id,
+                            title_id=template.title_id
+                        )
+                        db.session.add(uot)
+                        logger.info(f"Created user_organization_title: user={user_id}, org={template_org_id}, title={template.title_id}")
+                
                 user_result['assignment_success'] = True
                 user_result['survey_response_id'] = survey_response.id
                 user_result['survey_code'] = survey_code
@@ -9581,13 +9656,17 @@ def assign_survey_to_user():
                 
                 # Send assignment email
                 try:
+                    organization_name_for_email = (
+                        template_org_name
+                        or (user.organization.name if user.organization else None)
+                    )
                     email_result = send_survey_assignment_email(
                         to_email=user.email,
                         username=user.username,
                         password=user.password,
                         survey_code=survey_code,
                         firstname=user.firstname,
-                        organization_name=user.organization.name if user.organization else None,
+                        organization_name=organization_name_for_email,
                         survey_name=template.version.name if template.version else "Survey",
                         assigned_by=admin_name
                     )
@@ -9657,19 +9736,19 @@ def get_user_survey_assignments(user_id):
         
         logger.info(f"Found user: {user.username}, organization_id: {user.organization_id}")
         
-        # Get organization name if user has an organization
-        organization_type = "Survey"  # Default
+        # User's home organization (may differ from template org for cross-org assignments)
+        user_organization_type = "Survey"  # Default
         if user.organization_id:
             organization = Organization.query.filter_by(id=user.organization_id).first()
             if organization:
-                organization_type = organization.name
+                user_organization_type = organization.name
         
         # Get all survey responses for this user with eager loading of relationships
         assignments = db.session.query(SurveyResponse)\
             .options(joinedload(SurveyResponse.template)\
                       .joinedload(SurveyTemplate.version))\
             .filter_by(user_id=user_id).all()
-        logger.info(f"organization_type: {organization_type}")
+        logger.info(f"user_organization_type: {user_organization_type}")
         logger.info(f"Found {len(assignments)} assignments for user {user_id}")
         
         result = []
@@ -9677,6 +9756,9 @@ def get_user_survey_assignments(user_id):
             try:
                 template_name = "Survey"  # Default name
                 survey_code = None
+                assignment_org_id = None
+                assignment_org_name = None
+                assignment_org_type = "Survey"
                 
                 if assignment.template:
                     # Get survey_code from SurveyTemplate table
@@ -9684,18 +9766,33 @@ def get_user_survey_assignments(user_id):
                     
                     if assignment.template.version:
                         template_name = assignment.template.version.name
+
+                        # Prefer the template's organization for labeling (supports cross-org assignments)
+                        if getattr(assignment.template.version, 'organization', None):
+                            assignment_org_id = assignment.template.version.organization.id
+                            assignment_org_name = assignment.template.version.organization.name
+                        elif getattr(assignment.template.version, 'organization_id', None):
+                            assignment_org_id = assignment.template.version.organization_id
+                            org = Organization.query.get(assignment_org_id) if assignment_org_id else None
+                            assignment_org_name = org.name if org else None
                     else:
                         template_name = f"Template {assignment.template.id}"
                         logger.warning(f"Template {assignment.template.id} has no version")
                 else:
                     logger.warning(f"Assignment {assignment.id} has no template")
+
+                if assignment_org_name:
+                    assignment_org_type = assignment_org_name
                 
                 assignment_data = {
                     'id': assignment.id,
                     'template_id': assignment.template_id,
                     'template_name': template_name,
                     'survey_code': survey_code,  # Now from SurveyTemplate table
-                    'organization_type': organization_type,  # Add organization type
+                    # IMPORTANT: This is the survey's organization (template's org), not the user's org.
+                    'organization_type': assignment_org_type,
+                    'template_organization_id': assignment_org_id,
+                    'template_organization_name': assignment_org_name,
                     'status': assignment.status,
                     'created_at': assignment.created_at.isoformat() if assignment.created_at else None,
                     'start_date': assignment.start_date.isoformat() if assignment.start_date else None,
@@ -9713,12 +9810,13 @@ def get_user_survey_assignments(user_id):
             'user_id': user_id,
             'username': user.username,
             'email': user.email,
-            'organization_type': organization_type,  # Add to response data as well
+            # Backwards-compat: this remains the user's home organization label.
+            'organization_type': user_organization_type,
             'total_assignments': len(result),
             'assignments': result
         }
         
-        logger.info(f"Returning {len(result)} assignments for user {user_id} with organization type: {organization_type}")
+        logger.info(f"Returning {len(result)} assignments for user {user_id} (user org: {user_organization_type})")
         return jsonify(response_data), 200
         
     except Exception as e:
