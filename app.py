@@ -2,7 +2,7 @@ from flask import Flask, request, jsonify, g, make_response
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
 from sqlalchemy.dialects.mysql import JSON
-from sqlalchemy import text, or_
+from sqlalchemy import text, or_, and_, select
 from sqlalchemy import UniqueConstraint
 from sqlalchemy.orm import joinedload
 import json 
@@ -1536,6 +1536,49 @@ class Organization(db.Model):
     def __repr__(self):
         return f'<Organization {self.name}>'
 
+class OrganizationRelationship(db.Model):
+    """
+    Tracks relationships between organizations (denominations, accreditations, 
+    affiliations, umbrella associations, etc.)
+    """
+    __tablename__ = 'organization_relationships'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    organization_id = db.Column(db.Integer, db.ForeignKey('organizations.id'), nullable=False)
+    related_organization_id = db.Column(db.Integer, db.ForeignKey('organizations.id'), nullable=False)
+    relationship_type = db.Column(db.String(100), nullable=False)
+    start_date = db.Column(db.Date, nullable=True)
+    end_date = db.Column(db.Date, nullable=True)
+    notes = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, server_default=db.func.current_timestamp())
+    updated_at = db.Column(db.DateTime, server_default=db.func.current_timestamp(), onupdate=db.func.current_timestamp())
+    
+    # Relationships
+    organization = db.relationship('Organization', foreign_keys=[organization_id], backref='relationships_from')
+    related_organization = db.relationship('Organization', foreign_keys=[related_organization_id], backref='relationships_to')
+    
+    def __repr__(self):
+        return f'<OrgRelationship {self.organization_id} -> {self.related_organization_id} ({self.relationship_type})>'
+    
+    def to_dict(self):
+        """Convert to dictionary for JSON serialization"""
+        return {
+            'id': self.id,
+            'organization_id': self.organization_id,
+            'related_organization_id': self.related_organization_id,
+            'related_organization': {
+                'id': self.related_organization.id,
+                'name': self.related_organization.name,
+                'type': self.related_organization.organization_type.type if self.related_organization.organization_type else None
+            } if self.related_organization else None,
+            'relationship_type': self.relationship_type,
+            'start_date': self.start_date.isoformat() if self.start_date else None,
+            'end_date': self.end_date.isoformat() if self.end_date else None,
+            'notes': self.notes,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None
+        }
+
 class EmailTemplate(db.Model):
     __tablename__ = 'email_templates'
     id = db.Column(db.BigInteger, primary_key=True, autoincrement=True)
@@ -1948,12 +1991,18 @@ class ContactReferral(db.Model):
     
     # Referral tracking
     referred_by_id = db.Column(db.Integer, db.ForeignKey('contact_referrals.id', ondelete='CASCADE'), nullable=True)
+    referred_by_link_id = db.Column(db.Integer, db.ForeignKey('referral_links.id', ondelete='SET NULL'), nullable=True)
     is_primary = db.Column(db.Boolean, default=True)
     
     # Metadata
     device_info = db.Column(db.Text, nullable=True)
     ip_address = db.Column(db.String(50), nullable=True)
     location_data = db.Column(JSON, nullable=True)
+    manual_referrer_name = db.Column(db.String(255), nullable=True)
+    manual_referrer_contact = db.Column(db.String(255), nullable=True)
+    manual_referrer_email = db.Column(db.String(255), nullable=True)
+    manual_referrer_phone = db.Column(db.String(50), nullable=True)
+    manual_referrer_notes = db.Column(db.Text, nullable=True)
     created_at = db.Column(db.DateTime, server_default=db.func.current_timestamp())
     updated_at = db.Column(db.DateTime, server_default=db.func.current_timestamp(),
                            onupdate=db.func.current_timestamp())
@@ -4130,6 +4179,48 @@ def add_organization():
             db.session.add(template)
             logger.info(f"Created survey template version for organization {new_org.id}")
         
+        # Handle organization relationships (denomination, accreditation, affiliation, etc.)
+        if 'relationships' in data and data['relationships']:
+            logger.info(f"Creating organization relationships for organization {new_org.id}")
+            for rel_data in data['relationships']:
+                try:
+                    # Validate required fields
+                    if 'related_organization_id' not in rel_data or 'relationship_type' not in rel_data:
+                        logger.warning(f"Skipping relationship - missing required fields: {rel_data}")
+                        continue
+                    
+                    # Check if related organization exists
+                    related_org = Organization.query.get(rel_data['related_organization_id'])
+                    if not related_org:
+                        logger.warning(f"Skipping relationship - related organization {rel_data['related_organization_id']} not found")
+                        continue
+                    
+                    # Check for duplicate relationship
+                    existing_rel = OrganizationRelationship.query.filter_by(
+                        organization_id=new_org.id,
+                        related_organization_id=rel_data['related_organization_id'],
+                        relationship_type=rel_data['relationship_type']
+                    ).first()
+                    
+                    if existing_rel:
+                        logger.info(f"Relationship already exists: {new_org.id} -> {rel_data['related_organization_id']} ({rel_data['relationship_type']})")
+                        continue
+                    
+                    # Create the relationship
+                    relationship = OrganizationRelationship(
+                        organization_id=new_org.id,
+                        related_organization_id=rel_data['related_organization_id'],
+                        relationship_type=rel_data['relationship_type'],
+                        notes=rel_data.get('notes')
+                    )
+                    db.session.add(relationship)
+                    logger.info(f"Created relationship: {new_org.id} -> {rel_data['related_organization_id']} ({rel_data['relationship_type']})")
+                    
+                except Exception as rel_error:
+                    logger.error(f"Error creating relationship: {str(rel_error)}")
+                    # Continue with other relationships even if one fails
+                    continue
+        
         db.session.commit()
         logger.info(f"Successfully created organization with ID: {new_org.id}")
         
@@ -4159,16 +4250,32 @@ def update_organization(org_id):
         # Update basic organization fields
         if 'name' in data:
             org.name = data['name']
-        if 'organization_type_id' in data:
-            org.type = data['organization_type_id']  # Maps to new 'type' column
+        if 'organization_type_id' in data or 'type_id' in data:
+            org.type = data.get('organization_type_id') or data.get('type_id')  # Maps to new 'type' column
         if 'website' in data:
             org.website = data['website']
         if 'highest_level_of_education' in data:
             org.highest_level_of_education = data['highest_level_of_education']
-        if 'misc' in data:
-            org.details = data['misc']  # Maps to new 'details' column
         
-
+        # Handle details/misc field - merge with existing details
+        if 'misc' in data or 'details' in data:
+            existing_details = org.details or {}
+            new_details = data.get('misc') or data.get('details') or {}
+            org.details = {**existing_details, **new_details}  # Merge dictionaries
+        
+        # Handle affiliation fields - store them in details JSON
+        affiliation_fields = [
+            'denomination_affiliation',
+            'accreditation_status_or_body',
+            'affiliation_validation',
+            'umbrella_association_membership'
+        ]
+        
+        for field in affiliation_fields:
+            if field in data:
+                if org.details is None:
+                    org.details = {}
+                org.details[field] = data[field]
         
         # Update geo location if provided
         if 'geo_location' in data and data['geo_location']:
@@ -4207,6 +4314,68 @@ def update_organization(org_id):
                 db.session.add(geo_location)
                 db.session.flush()
                 org.address = geo_location.id  # Maps to new 'address' column
+        
+        # Handle organization relationships (denomination, accreditation, affiliation, etc.)
+        if 'relationships' in data and data['relationships']:
+            logger.info(f"Updating organization relationships for organization {org_id}")
+            
+            # Get existing relationships
+            existing_relationships = OrganizationRelationship.query.filter_by(
+                organization_id=org_id
+            ).all()
+            
+            # Create a map of existing relationships by type
+            existing_rel_map = {
+                rel.relationship_type: rel for rel in existing_relationships
+            }
+            
+            # Process new relationships
+            for rel_data in data['relationships']:
+                try:
+                    # Validate required fields
+                    if 'related_organization_id' not in rel_data or 'relationship_type' not in rel_data:
+                        logger.warning(f"Skipping relationship - missing required fields: {rel_data}")
+                        continue
+                    
+                    rel_type = rel_data['relationship_type']
+                    related_org_id = rel_data['related_organization_id']
+                    
+                    # Check if related organization exists
+                    related_org = Organization.query.get(related_org_id)
+                    if not related_org:
+                        logger.warning(f"Skipping relationship - related organization {related_org_id} not found")
+                        continue
+                    
+                    # Check if relationship already exists
+                    if rel_type in existing_rel_map:
+                        # Update existing relationship
+                        existing_rel = existing_rel_map[rel_type]
+                        if existing_rel.related_organization_id != related_org_id:
+                            existing_rel.related_organization_id = related_org_id
+                            existing_rel.notes = rel_data.get('notes')
+                            logger.info(f"Updated relationship: {org_id} -> {related_org_id} ({rel_type})")
+                        # Remove from map so we know it was processed
+                        del existing_rel_map[rel_type]
+                    else:
+                        # Create new relationship
+                        relationship = OrganizationRelationship(
+                            organization_id=org_id,
+                            related_organization_id=related_org_id,
+                            relationship_type=rel_type,
+                            notes=rel_data.get('notes')
+                        )
+                        db.session.add(relationship)
+                        logger.info(f"Created relationship: {org_id} -> {related_org_id} ({rel_type})")
+                    
+                except Exception as rel_error:
+                    logger.error(f"Error processing relationship: {str(rel_error)}")
+                    # Continue with other relationships even if one fails
+                    continue
+            
+            # Delete relationships that were not in the update (removed by user)
+            for rel_type, rel in existing_rel_map.items():
+                db.session.delete(rel)
+                logger.info(f"Deleted relationship: {org_id} -> {rel.related_organization_id} ({rel_type})")
         
         # Note: Contact updates would be more complex and should be handled separately
         # to avoid complications with user management
@@ -4339,6 +4508,364 @@ def delete_organization(org_id):
         logger.error(f"Error deleting organization {org_id}: {str(e)}")
         logger.error(traceback.format_exc())
         return jsonify({'error': f'Failed to delete organization: {str(e)}'}), 500
+
+@app.route('/api/organizations/<int:org_id>/users', methods=['GET'])
+def get_organization_users(org_id):
+    """Get all users associated with an organization"""
+    try:
+        # Check if organization exists
+        org = Organization.query.get_or_404(org_id)
+        
+        # Get users belonging to this organization (users table)
+        org_users = User.query.filter_by(organization_id=org_id).all()
+        
+        # Get users associated via titles (user_organization_titles table)
+        associated_users = db.session.query(User).join(UserOrganizationTitle).filter(
+            UserOrganizationTitle.organization_id == org_id
+        ).all()
+        
+        # Combine and deduplicate based on user ID
+        all_users_map = {u.id: u for u in org_users + associated_users}
+        all_users = list(all_users_map.values())
+        
+        result = []
+        for user in all_users:
+            # Get roles
+            user_role_names = [r.name for r in (user.roles or [])]
+            primary_role = user_role_names[0] if user_role_names else 'user'
+            
+            # Get specific title for this organization
+            org_title = UserOrganizationTitle.query.filter_by(
+                user_id=user.id, 
+                organization_id=org_id
+            ).first()
+            
+            display_role = org_title.title.name if (org_title and org_title.title) else primary_role
+            
+            # Check survey assignment
+            survey_response = SurveyResponse.query.filter_by(user_id=user.id).first()
+            
+            # Debug logging
+            logger.info(f"User {user.id} ({user.username}): survey_response = {survey_response}, has_survey_assigned = {bool(survey_response)}")
+            
+            user_data = {
+                'id': user.id,
+                'username': user.username,
+                'email': user.email,
+                'firstname': user.firstname,
+                'lastname': user.lastname,
+                'role': primary_role,
+                'display_role': display_role,
+                'phone': user.phone,
+                'organization_id': user.organization_id,
+                'is_home_member': user.organization_id == org_id,
+                'has_survey_assigned': bool(survey_response),
+                'has_completed_survey': (survey_response.status == 'completed') if survey_response else False,
+                'survey_status': survey_response.status if survey_response else None,
+                'template_id': survey_response.template_id if survey_response else None,
+                'status': 'active'
+            }
+            
+            # Add system roles list for multi-select
+            user_data['roles'] = user_role_names
+            
+            # Add titles list for multi-select (scoped to this organization)
+            user_data['titles'] = []
+            try:
+                user_org_titles = UserOrganizationTitle.query.filter_by(user_id=user.id, organization_id=org_id).all()
+                for ut in user_org_titles:
+                    if ut.title:
+                        user_data['titles'].append({'id': ut.title.id, 'name': ut.title.name})
+            except Exception as e:
+                logger.error(f"Error fetching titles for user {user.id}: {str(e)}")
+            
+            # Add geo_location as nested object (matching /api/users format)
+            if user.geo_location:
+                user_data['geo_location'] = {
+                    'continent': user.geo_location.continent,
+                    'region': user.geo_location.region,
+                    'country': user.geo_location.country,
+                    'province': user.geo_location.province,
+                    'city': user.geo_location.city,
+                    'town': user.geo_location.town,
+                    'address_line1': user.geo_location.address_line1,
+                    'address_line2': user.geo_location.address_line2,
+                    'postal_code': user.geo_location.postal_code,
+                    'latitude': float(user.geo_location.latitude) if user.geo_location.latitude else 0,
+                    'longitude': float(user.geo_location.longitude) if user.geo_location.longitude else 0
+                }
+                # Keep backward compatibility with flat fields
+                user_data['address_line1'] = user.geo_location.address_line1
+                user_data['city'] = user.geo_location.city
+                user_data['country'] = user.geo_location.country
+            
+            result.append(user_data)
+            
+        return jsonify(result), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting organization users: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+# Organization Relationships API Endpoints
+@app.route('/api/organization-relationships', methods=['GET'])
+def get_all_organization_relationships():
+    """Get all organization relationships with optional filtering"""
+    try:
+        # Optional filters
+        org_id = request.args.get('organization_id', type=int)
+        rel_type = request.args.get('relationship_type')
+        
+        query = OrganizationRelationship.query
+        
+        if org_id:
+            query = query.filter_by(organization_id=org_id)
+        if rel_type:
+            query = query.filter_by(relationship_type=rel_type)
+        
+        relationships = query.all()
+        
+        return jsonify([rel.to_dict() for rel in relationships]), 200
+        
+    except Exception as e:
+        logger.error(f"Error fetching relationships: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/organization-relationships', methods=['POST'])
+def create_organization_relationship():
+    """Create a new organization relationship"""
+    try:
+        data = request.get_json()
+        logger.info(f"Creating organization relationship: {data}")
+        
+        # Validate required fields
+        required_fields = ['organization_id', 'related_organization_id', 'relationship_type']
+        for field in required_fields:
+            if field not in data:
+                return jsonify({'error': f'Missing required field: {field}'}), 400
+        
+        # Validate that both organizations exist
+        org = Organization.query.get(data['organization_id'])
+        if not org:
+            return jsonify({'error': f"Organization {data['organization_id']} not found"}), 404
+        
+        related_org = Organization.query.get(data['related_organization_id'])
+        if not related_org:
+            return jsonify({'error': f"Related organization {data['related_organization_id']} not found"}), 404
+        
+        # Prevent self-referencing
+        if data['organization_id'] == data['related_organization_id']:
+            return jsonify({'error': 'Organization cannot have a relationship with itself'}), 400
+        
+        # Check for existing relationship
+        existing = OrganizationRelationship.query.filter_by(
+            organization_id=data['organization_id'],
+            related_organization_id=data['related_organization_id'],
+            relationship_type=data['relationship_type']
+        ).first()
+        
+        if existing:
+            return jsonify({
+                'error': 'Relationship already exists',
+                'existing_id': existing.id
+            }), 409
+        
+        # Parse dates if provided
+        start_date = None
+        end_date = None
+        if data.get('start_date'):
+            try:
+                start_date = datetime.strptime(data['start_date'], '%Y-%m-%d').date()
+            except ValueError:
+                return jsonify({'error': 'Invalid start_date format. Use YYYY-MM-DD'}), 400
+        
+        if data.get('end_date'):
+            try:
+                end_date = datetime.strptime(data['end_date'], '%Y-%m-%d').date()
+            except ValueError:
+                return jsonify({'error': 'Invalid end_date format. Use YYYY-MM-DD'}), 400
+        
+        # Create relationship
+        relationship = OrganizationRelationship(
+            organization_id=data['organization_id'],
+            related_organization_id=data['related_organization_id'],
+            relationship_type=data['relationship_type'],
+            start_date=start_date,
+            end_date=end_date,
+            notes=data.get('notes')
+        )
+        
+        db.session.add(relationship)
+        db.session.commit()
+        
+        logger.info(f"Created relationship with ID: {relationship.id}")
+        
+        return jsonify({
+            'message': 'Relationship created successfully',
+            'relationship': relationship.to_dict()
+        }), 201
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error creating relationship: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/organizations/<int:org_id>/relationships', methods=['GET'])
+def get_organization_relationships(org_id):
+    """Get all relationships for a specific organization"""
+    try:
+        org = Organization.query.get_or_404(org_id)
+        
+        # Get relationships where this org is the source
+        rel_type_filter = request.args.get('relationship_type')
+        
+        query = OrganizationRelationship.query.filter_by(organization_id=org_id)
+        
+        if rel_type_filter:
+            query = query.filter_by(relationship_type=rel_type_filter)
+        
+        relationships = query.all()
+        
+        # Also get reverse relationships (where this org is the target)
+        reverse_query = OrganizationRelationship.query.filter_by(related_organization_id=org_id)
+        if rel_type_filter:
+            reverse_query = reverse_query.filter_by(relationship_type=rel_type_filter)
+        
+        reverse_relationships = reverse_query.all()
+        
+        result = {
+            'organization_id': org_id,
+            'organization_name': org.name,
+            'outgoing_relationships': [rel.to_dict() for rel in relationships],
+            'incoming_relationships': [
+                {
+                    **rel.to_dict(),
+                    'source_organization': {
+                        'id': rel.organization.id,
+                        'name': rel.organization.name,
+                        'type': rel.organization.organization_type.type if rel.organization.organization_type else None
+                    }
+                } for rel in reverse_relationships
+            ]
+        }
+        
+        return jsonify(result), 200
+        
+    except Exception as e:
+        logger.error(f"Error fetching relationships for org {org_id}: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/organization-relationships/<int:rel_id>', methods=['GET'])
+def get_organization_relationship(rel_id):
+    """Get a specific relationship by ID"""
+    try:
+        relationship = OrganizationRelationship.query.get_or_404(rel_id)
+        return jsonify(relationship.to_dict()), 200
+        
+    except Exception as e:
+        logger.error(f"Error fetching relationship {rel_id}: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/organization-relationships/<int:rel_id>', methods=['PUT'])
+def update_organization_relationship(rel_id):
+    """Update an existing organization relationship"""
+    try:
+        relationship = OrganizationRelationship.query.get_or_404(rel_id)
+        data = request.get_json()
+        
+        logger.info(f"Updating relationship {rel_id} with data: {data}")
+        
+        # Update allowed fields
+        if 'start_date' in data:
+            if data['start_date']:
+                relationship.start_date = datetime.strptime(data['start_date'], '%Y-%m-%d').date()
+            else:
+                relationship.start_date = None
+        
+        if 'end_date' in data:
+            if data['end_date']:
+                relationship.end_date = datetime.strptime(data['end_date'], '%Y-%m-%d').date()
+            else:
+                relationship.end_date = None
+        
+        if 'notes' in data:
+            relationship.notes = data['notes']
+        
+        # Note: We don't allow changing organization_id, related_organization_id, or relationship_type
+        # If those need to change, delete and create a new relationship
+        
+        db.session.commit()
+        
+        logger.info(f"Successfully updated relationship {rel_id}")
+        
+        return jsonify({
+            'message': 'Relationship updated successfully',
+            'relationship': relationship.to_dict()
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error updating relationship {rel_id}: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/organization-relationships/<int:rel_id>', methods=['DELETE'])
+def delete_organization_relationship(rel_id):
+    """Delete an organization relationship"""
+    try:
+        relationship = OrganizationRelationship.query.get_or_404(rel_id)
+        
+        logger.info(f"Deleting relationship {rel_id}: {relationship.organization_id} -> {relationship.related_organization_id} ({relationship.relationship_type})")
+        
+        db.session.delete(relationship)
+        db.session.commit()
+        
+        return jsonify({'message': 'Relationship deleted successfully'}), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error deleting relationship {rel_id}: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/organizations/<int:org_id>/relationships/by-type', methods=['GET'])
+def get_organization_relationships_by_type(org_id):
+    """Get relationships grouped by type for easier frontend consumption"""
+    try:
+        org = Organization.query.get_or_404(org_id)
+        
+        relationships = OrganizationRelationship.query.filter_by(
+            organization_id=org_id
+        ).all()
+        
+        # Group by relationship type dynamically
+        grouped = {}
+        
+        for rel in relationships:
+            rel_type = rel.relationship_type
+            if rel_type not in grouped:
+                grouped[rel_type] = []
+            
+            grouped[rel_type].append({
+                'id': rel.id,
+                'organization_id': rel.related_organization_id,
+                'organization_name': rel.related_organization.name,
+                'notes': rel.notes,
+                'start_date': rel.start_date.isoformat() if rel.start_date else None
+            })
+        
+        return jsonify(grouped), 200
+        
+    except Exception as e:
+        logger.error(f"Error fetching grouped relationships for org {org_id}: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
 # Account Holder API Endpoints
 @app.route('/api/organizations/<int:org_id>/account-holders', methods=['GET'])
@@ -5203,6 +5730,7 @@ def get_all_users():
         # Include template_id from survey response if available
         survey_response = SurveyResponse.query.filter_by(user_id=user.id).first()
         user_data['template_id'] = survey_response.template_id if survey_response else None
+        user_data['has_survey_assigned'] = bool(survey_response)
         
         # Include organization info if available
         if user.organization:
@@ -5272,7 +5800,8 @@ def get_user(user_id):
         'firstname': user.firstname,
         'lastname': user.lastname,
         'organization_id': user.organization_id,
-        'template_id': template_id  # Include template_id from survey response
+        'template_id': template_id,  # Include template_id from survey response
+        'has_survey_assigned': bool(survey_response)
     }
     return jsonify(result)
 
@@ -12095,6 +12624,7 @@ def create_contact_referral():
         # Extract primary contact data
         primary_data = data.get('primary_contact', {})
         referrals_data = data.get('referrals', [])
+        primary_contact_id = data.get('primary_contact_id')
 
         # Referral-link metadata (optional)
         referred_by_link_id = data.get('referred_by_link_id')
@@ -12114,30 +12644,48 @@ def create_contact_referral():
             }
         
         # Get metadata from request
+        logger.info(f"Received create_contact_referral request with data keys: {data.keys()}")
+        logger.info(f"Primary data keys: {primary_data.keys()}")
+        if 'manualReferrerName' in primary_data:
+            logger.info(f"Manual Referrer Name present: {primary_data['manualReferrerName']}")
+        
         ip_address = request.remote_addr
         user_agent = request.headers.get('User-Agent', '')
         
-        # Create primary contact
-        primary_contact = ContactReferral(
-            first_name=primary_data.get('firstName', ''),
-            last_name=primary_data.get('lastName', ''),
-            email=primary_data.get('email', ''),
-            full_phone=primary_data.get('fullPhone', ''),
-            whatsapp=primary_data.get('whatsapp', ''),
-            preferred_contact=primary_data.get('preferredContact', ''),
-            type_of_institution=primary_data.get('typeOfInstitution', ''),
-            institution_name=primary_data.get('institutionName', ''),
-            title=primary_data.get('title', ''),
-            physical_address=primary_data.get('physicalAddress', ''),
-            country=primary_data.get('country', ''),
-            is_primary=True,
-            device_info=user_agent,
-            ip_address=ip_address,
-            location_data={'referral': referral_meta} if referral_meta else None
-        )
-        
-        db.session.add(primary_contact)
-        db.session.flush()  # Get the primary contact ID
+        # Create primary contact if ID not provided
+        primary_contact = None
+        if primary_contact_id:
+            primary_contact = ContactReferral.query.get(primary_contact_id)
+            if not primary_contact:
+                logger.warning(f"Primary contact ID {primary_contact_id} not found, creating new one")
+                
+        if not primary_contact:
+            primary_contact = ContactReferral(
+                first_name=primary_data.get('firstName', ''),
+                last_name=primary_data.get('lastName', ''),
+                email=primary_data.get('email', ''),
+                full_phone=primary_data.get('fullPhone', ''),
+                whatsapp=primary_data.get('whatsapp', ''),
+                preferred_contact=primary_data.get('preferredContact', ''),
+                type_of_institution=primary_data.get('typeOfInstitution', ''),
+                institution_name=primary_data.get('institutionName', ''),
+                title=primary_data.get('title', ''),
+                physical_address=primary_data.get('physicalAddress', ''),
+                country=primary_data.get('country', ''),
+                is_primary=True,
+                referred_by_link_id=referral_link.id if referral_link else None,
+                manual_referrer_name=primary_data.get('manualReferrerName'),
+                manual_referrer_contact=primary_data.get('manualReferrerContact'),
+                manual_referrer_email=primary_data.get('manualReferrerEmail'),
+                manual_referrer_phone=primary_data.get('manualReferrerPhone'),
+                manual_referrer_notes=primary_data.get('manualReferrerNotes'),
+                device_info=user_agent,
+                ip_address=ip_address,
+                location_data={'referral': referral_meta} if referral_meta else None
+            )
+            
+            db.session.add(primary_contact)
+            db.session.flush()  # Get the primary contact ID
         
         # Create referral contacts
         referral_contacts = []
@@ -12170,6 +12718,7 @@ def create_contact_referral():
                 country=referral_data.get('country', ''),
                 is_primary=False,
                 referred_by_id=referred_by_id,  # Link to original person if duplicate
+                referred_by_link_id=referral_link.id if referral_link else None,
                 device_info=user_agent,
                 ip_address=ip_address,
                 location_data={'referral': referral_meta} if referral_meta else None
@@ -12215,6 +12764,92 @@ def get_contact_referrals():
         result = []
         for contact in primary_contacts:
             contact_dict = contact.to_dict()
+            
+            # Add referrer information
+            referrer_info = None
+            
+            # Debug logging
+            logger.info(f"Processing contact {contact.id}: referred_by_link_id={contact.referred_by_link_id}, referred_by_id={contact.referred_by_id}")
+            
+            # Check if referred by link
+            if contact.referred_by_link_id:
+                referral_link = ReferralLink.query.get(contact.referred_by_link_id)
+                logger.info(f"Found referral_link: {referral_link}")
+                if referral_link and referral_link.user:
+                    user = referral_link.user
+                    referrer_info = {
+                        'type': 'link',
+                        'name': f"{user.first_name} {user.last_name}" if hasattr(user, 'first_name') and user.first_name else user.username,
+                        'email': user.email,
+                        'referral_code': referral_link.referral_code
+                    }
+                    logger.info(f"Created referrer_info for link: {referrer_info}")
+            
+            # Check if referred by another contact or user
+            elif contact.referred_by_id:
+                # First, try to find a user with this ID
+                referring_user = User.query.get(contact.referred_by_id)
+                
+                if referring_user:
+                    # referred_by_id is actually a user_id
+                    referrer_info = {
+                        'type': 'user',
+                        'name': f"{referring_user.first_name} {referring_user.last_name}" if hasattr(referring_user, 'first_name') and referring_user.first_name else referring_user.username,
+                        'email': referring_user.email,
+                        'user_id': referring_user.id
+                    }
+                    logger.info(f"Found referring user {referring_user.id} for contact {contact.id}")
+                else:
+                    # Fallback: check if it's a contact_referral ID
+                    referring_contact = ContactReferral.query.get(contact.referred_by_id)
+                    if referring_contact:
+                        # Check if this contact has been converted to a user
+                        referring_user_by_email = User.query.filter_by(email=referring_contact.email).first()
+                        
+                        if referring_user_by_email:
+                            # Contact has been approved and converted to user - show user info
+                            referrer_info = {
+                                'type': 'user',
+                                'name': f"{referring_user_by_email.first_name} {referring_user_by_email.last_name}" if hasattr(referring_user_by_email, 'first_name') and referring_user_by_email.first_name else referring_user_by_email.username,
+                                'email': referring_user_by_email.email,
+                                'user_id': referring_user_by_email.id
+                            }
+                            logger.info(f"Referring contact {referring_contact.id} has been converted to user {referring_user_by_email.id}")
+                        else:
+                            # Contact hasn't been approved yet - show contact info
+                            referrer_info = {
+                                'type': 'contact',
+                                'name': f"{referring_contact.first_name} {referring_contact.last_name}",
+                                'email': referring_contact.email
+                            }
+                            logger.info(f"Referring contact {referring_contact.id} has not been converted to user yet")
+            
+            # Check for manual referrer
+            elif contact.manual_referrer_name:
+                referrer_info = {
+                    'type': 'manual',
+                    'name': contact.manual_referrer_name,
+                    'contact': contact.manual_referrer_contact,
+                    'email': contact.manual_referrer_email,
+                    'phone': contact.manual_referrer_phone,
+                    'notes': contact.manual_referrer_notes
+                }
+            
+            contact_dict['referrer_info'] = referrer_info
+            logger.info(f"Final referrer_info for contact {contact.id}: {referrer_info}")
+            
+            # Add manual referrer info if present (for backward compatibility)
+            if contact.manual_referrer_name:
+                contact_dict['manual_referrer_name'] = contact.manual_referrer_name
+            if contact.manual_referrer_contact:
+                contact_dict['manual_referrer_contact'] = contact.manual_referrer_contact
+            if contact.manual_referrer_email:
+                contact_dict['manual_referrer_email'] = contact.manual_referrer_email
+            if contact.manual_referrer_phone:
+                contact_dict['manual_referrer_phone'] = contact.manual_referrer_phone
+            if contact.manual_referrer_notes:
+                contact_dict['manual_referrer_notes'] = contact.manual_referrer_notes
+                
             # Get referrals for this contact
             referrals = ContactReferral.query.filter_by(referred_by_id=contact.id).all()
             contact_dict['referrals'] = [ref.to_dict() for ref in referrals]
@@ -12228,6 +12863,7 @@ def get_contact_referrals():
         
     except Exception as e:
         logger.error(f"Error fetching contact referrals: {str(e)}")
+        logger.error(traceback.format_exc())
         return jsonify({
             'success': False,
             'error': 'Failed to fetch contact referrals'
@@ -12277,6 +12913,52 @@ def approve_contact_referral(referral_id):
             # Create new organization
             org_name = data.get('organization_name') or referral.institution_name
             org_type_id = data.get('organization_type_id')
+            
+            # Handle empty string as None for integer column
+            # Handle empty string as None for integer column
+            if org_type_id == '' or org_type_id is None:
+                # Try to map from referral.type_of_institution
+                if referral.type_of_institution:
+                    type_str = referral.type_of_institution.lower()
+                    
+                    # 1. Direct case-insensitive match
+                    org_type = OrganizationType.query.filter(db.func.lower(OrganizationType.type) == type_str).first()
+                    
+                    if not org_type:
+                         # 2. Known semantic mappings
+                        if type_str == 'non_formal_organizations':
+                            org_type = OrganizationType.query.filter(
+                                db.or_(
+                                    db.func.lower(OrganizationType.type).like('%non-formal%'),
+                                    db.func.lower(OrganizationType.type).like('%business%'), # Fallback assumption
+                                    db.func.lower(OrganizationType.type).like('%organization%')
+                                )
+                            ).order_by(db.func.length(OrganizationType.type)).first()
+                        elif type_str == 'church':
+                            org_type = OrganizationType.query.filter(db.func.lower(OrganizationType.type).like('%church%')).first()
+                        elif 'institution' in type_str:
+                             org_type = OrganizationType.query.filter(db.func.lower(OrganizationType.type).like('%institution%')).first()
+                        
+                        # 3. Fallback: Search for any word match
+                        if not org_type:
+                             words = type_str.replace('_', ' ').split()
+                             for word in words:
+                                 if len(word) > 3: # Skip small words
+                                     org_type = OrganizationType.query.filter(db.func.lower(OrganizationType.type).like(f'%{word}%')).first()
+                                     if org_type:
+                                         break
+
+                    if org_type:
+                        org_type_id = org_type.id
+                        logger.info(f"Mapped organization type '{referral.type_of_institution}' to ID {org_type_id} ({org_type.type})")
+                    else:
+                        logger.warning(f"Could not map organization type '{referral.type_of_institution}' to an ID")
+                        # Optional: Set a default type ID if you have one, e.g., 'Other'
+                        # default_type = OrganizationType.query.filter_by(type='Other').first()
+                        # if default_type: org_type_id = default_type.id
+                        org_type_id = None
+                else:
+                    org_type_id = None
             
             if not org_name:
                 return jsonify({
@@ -12405,19 +13087,37 @@ def approve_contact_referral(referral_id):
             lastname=referral.last_name,
             phone=referral.full_phone,
             organization_id=organization_id,
-            title_id=title_id,
             geo_location_id=user_geo_location_id,
             survey_code=survey_code
         )
         
+        # Add user to session and flush to get the ID
+        db.session.add(new_user)
+        db.session.flush()  # This assigns the ID to new_user
+        
         # Assign role
+        # Roles are now handled via user_roles table with extra columns
         role_name = data.get('ui_role', 'user')
         user_role = Role.query.filter_by(name=role_name).first()
+        
         if user_role:
-            new_user.roles.append(user_role)
-            new_user.role_id = user_role.id
-        db.session.add(new_user)
-        db.session.flush()
+            # Create entry in user_roles association table with organization
+            stmt = user_roles.insert().values(
+                user_id=new_user.id,
+                role_id=user_role.id,
+                organization_id=organization_id
+            )
+            db.session.execute(stmt)
+            
+            # Handle title assignment via UserOrganizationTitle
+            if title_id and organization_id:
+                user_org_title = UserOrganizationTitle(
+                    user_id=new_user.id,
+                    organization_id=organization_id,
+                    title_id=title_id
+                )
+                db.session.add(user_org_title)
+                logger.info(f"Created UserOrganizationTitle: user_id={new_user.id}, org_id={organization_id}, title_id={title_id}")
         
         # Create survey response if template provided
         template_id = data.get('template_id')
@@ -12522,6 +13222,16 @@ def update_contact_referral(referral_id):
             referral.physical_address = data['physicalAddress']
         if 'country' in data:
             referral.country = data['country']
+        if 'manualReferrerName' in data:
+            referral.manual_referrer_name = data['manualReferrerName']
+        if 'manualReferrerContact' in data:
+            referral.manual_referrer_contact = data['manualReferrerContact']
+        if 'manualReferrerEmail' in data:
+            referral.manual_referrer_email = data['manualReferrerEmail']
+        if 'manualReferrerPhone' in data:
+            referral.manual_referrer_phone = data['manualReferrerPhone']
+        if 'manualReferrerNotes' in data:
+            referral.manual_referrer_notes = data['manualReferrerNotes']
         
         db.session.commit()
         logger.info(f"Successfully updated referral {referral_id}")
@@ -12698,7 +13408,12 @@ def check_email_exists():
                     'institutionName': contact_referral.institution_name,
                     'title': contact_referral.title,
                     'physicalAddress': contact_referral.physical_address,
-                    'country': contact_referral.country
+                    'country': contact_referral.country,
+                    'manualReferrerName': contact_referral.manual_referrer_name,
+                    'manualReferrerContact': contact_referral.manual_referrer_contact,
+                    'manualReferrerEmail': contact_referral.manual_referrer_email,
+                    'manualReferrerPhone': contact_referral.manual_referrer_phone,
+                    'manualReferrerNotes': contact_referral.manual_referrer_notes
                 },
                 'subReferrals': sub_referrals_data
             }), 200
@@ -13067,36 +13782,81 @@ def save_report():
 @app.route('/api/users/<int:user_id>/roles', methods=['PUT'])
 def update_user_roles(user_id):
     """
-    Update roles for a user.
-    Expects JSON: { "roles": ["user", "manager"] }
+    Update roles for a user in a specific organization.
+    Expects JSON: { 
+        "roles": ["user", "manager"],
+        "organization_id": 123  (required)
+    }
     """
     try:
         user = User.query.get_or_404(user_id)
         data = request.get_json()
         
+        logger.info(f"📥 Updating roles for user {user_id}: {data}")
+        
         if 'roles' not in data:
             return jsonify({"error": "No roles provided"}), 400
         
+        if 'organization_id' not in data:
+            return jsonify({"error": "organization_id is required"}), 400
+        
         new_role_names = data['roles']
+        organization_id = data['organization_id']
+        
         if not isinstance(new_role_names, list):
             return jsonify({"error": "Roles must be a list"}), 400
         
-        # Clear existing roles
-        user.roles = []
+        # Verify organization exists
+        organization = Organization.query.get(organization_id)
+        if not organization:
+            return jsonify({"error": f"Organization {organization_id} not found"}), 404
         
-        # Add new roles
+        logger.info(f"🗑️ Deleting existing roles for user {user_id} in organization {organization_id}")
+        
+        # Delete existing roles for this user in this organization
+        db.session.execute(
+            user_roles.delete().where(
+                and_(
+                    user_roles.c.user_id == user_id,
+                    user_roles.c.organization_id == organization_id
+                )
+            )
+        )
+        
+        # Add new roles for this organization
         for r_name in new_role_names:
             r_obj = Role.query.filter_by(name=r_name).first()
             if r_obj:
-                user.roles.append(r_obj)
+                logger.info(f"➕ Adding role '{r_name}' (id={r_obj.id}) for user {user_id} in org {organization_id}")
+                db.session.execute(
+                    user_roles.insert().values(
+                        user_id=user_id,
+                        role_id=r_obj.id,
+                        organization_id=organization_id
+                    )
+                )
             else:
-                logger.warning(f"Role '{r_name}' not found in database")
+                logger.warning(f"⚠️ Role '{r_name}' not found in database")
         
         # Commit changes
         db.session.commit()
         
-        # Get current roles for response
-        current_roles = [r.name for r in user.roles]
+        logger.info(f"✅ Roles updated successfully for user {user_id} in org {organization_id}")
+        
+        # Get current roles for this organization
+        result = db.session.execute(
+            select(Role.name).select_from(user_roles).join(
+                Role, user_roles.c.role_id == Role.id
+            ).where(
+                and_(
+                    user_roles.c.user_id == user_id,
+                    user_roles.c.organization_id == organization_id
+                )
+            )
+        )
+        current_roles = [row[0] for row in result]
+        
+        logger.info(f"📋 Current roles for user {user_id} in org {organization_id}: {current_roles}")
         
         # Determine primary role based on hierarchy
         primary_role = None
@@ -13104,6 +13864,8 @@ def update_user_roles(user_id):
             primary_role = 'admin'
         elif 'manager' in current_roles:
             primary_role = 'manager'
+        elif 'association' in current_roles:
+            primary_role = 'association'
         elif 'user' in current_roles:
             primary_role = 'user'
         elif current_roles:
@@ -13112,12 +13874,13 @@ def update_user_roles(user_id):
         return jsonify({
             "message": "Roles updated successfully",
             "roles": current_roles,
-            "primary_role": primary_role
+            "primary_role": primary_role,
+            "organization_id": organization_id
         }), 200
         
     except Exception as e:
         db.session.rollback()
-        logger.error(f"Error updating user roles: {str(e)}")
+        logger.error(f"❌ Error updating user roles: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/reports/<int:report_id>', methods=['DELETE'])
@@ -13375,6 +14138,37 @@ def remove_user_organization_title(user_id, org_id, title_id):
     except Exception as e:
         db.session.rollback()
         logger.error(f"Error removing assignment: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+# ============================================================================
+# UTILITIES AND MIGRATIONS
+# ============================================================================
+
+@app.route('/api/db/migrate-referrers', methods=['GET'])
+def migrate_referrers_db():
+    try:
+        # Check if columns exist
+        sql_check = text("SHOW COLUMNS FROM contact_referrals LIKE 'manual_referrer_name'")
+        result = db.session.execute(sql_check).fetchone()
+        
+        if result:
+            return jsonify({"message": "Columns already exist in contact_referrals"}), 200
+
+        # Add columns
+        sql_add = text("""
+        ALTER TABLE contact_referrals 
+        ADD COLUMN manual_referrer_name VARCHAR(255) NULL,
+        ADD COLUMN manual_referrer_contact VARCHAR(255) NULL,
+        ADD COLUMN manual_referrer_email VARCHAR(255) NULL,
+        ADD COLUMN manual_referrer_phone VARCHAR(50) NULL,
+        ADD COLUMN manual_referrer_notes TEXT NULL;
+        """)
+        
+        db.session.execute(sql_add)
+        db.session.commit()
+        return jsonify({"message": "Successfully migrated contact_referrals table"}), 200
+    except Exception as e:
+        db.session.rollback()
         return jsonify({"error": str(e)}), 500
 
 # ============================================================================
