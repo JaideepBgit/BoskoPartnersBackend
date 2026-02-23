@@ -1696,6 +1696,74 @@ class UserDetails(db.Model):
     def __repr__(self):
         return f'<UserDetails user_id={self.user_id}>'
 
+class UserProfile(db.Model):
+    """Onboarding profile data for respondent users (issue #49)."""
+    __tablename__ = 'user_profiles'
+
+    id = db.Column(db.BigInteger, primary_key=True, autoincrement=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE', onupdate='CASCADE'), nullable=False, unique=True)
+
+    # Step 1 — Basic Info
+    date_of_birth = db.Column(db.Date, nullable=True)
+    gender = db.Column(db.String(50), nullable=True)
+    marital_status = db.Column(db.String(50), nullable=True)
+    education_level = db.Column(db.String(100), nullable=True)
+    employment_status = db.Column(db.String(100), nullable=True)
+    geo_location_id = db.Column(db.Integer, db.ForeignKey('geo_locations.id', ondelete='SET NULL', onupdate='CASCADE'), nullable=True)
+
+    # Step 3 — Institutional Role (conditional)
+    institutional_role = db.Column(db.String(50), nullable=True)
+    institutional_status = db.Column(db.String(20), nullable=True)
+    grade_level = db.Column(db.String(50), nullable=True)
+    program_enrolled = db.Column(db.String(100), nullable=True)
+    department = db.Column(db.String(100), nullable=True)
+    graduation_year = db.Column(db.String(4), nullable=True)
+
+    # Step 4 — Church/Faith Profile (conditional)
+    church_member_status = db.Column(db.String(50), nullable=True)
+    church_role = db.Column(db.String(50), nullable=True)
+    years_affiliated = db.Column(db.String(50), nullable=True)
+    baptized = db.Column(db.String(20), nullable=True)
+    small_group_participation = db.Column(db.SmallInteger, nullable=True)
+
+    # Step 5 — Data Sharing
+    share_survey_responses = db.Column(db.SmallInteger, nullable=False, default=0)
+    share_profile_data = db.Column(db.SmallInteger, nullable=False, default=0)
+    comm_pref_email = db.Column(db.SmallInteger, nullable=False, default=1)
+    comm_pref_sms = db.Column(db.SmallInteger, nullable=False, default=0)
+    comm_pref_announcements = db.Column(db.SmallInteger, nullable=False, default=1)
+
+    # Tracking
+    onboarding_step = db.Column(db.Integer, nullable=False, default=1)
+    onboarding_complete = db.Column(db.SmallInteger, nullable=False, default=0)
+
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    user = db.relationship('User', backref=db.backref('profile', uselist=False, lazy=True))
+    geo_location = db.relationship('GeoLocation', foreign_keys=[geo_location_id])
+
+    def __repr__(self):
+        return f'<UserProfile user_id={self.user_id}>'
+
+
+class UserOrgAffiliation(db.Model):
+    """Organizational affiliations collected during onboarding Step 2."""
+    __tablename__ = 'user_org_affiliations'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    organization_id = db.Column(db.Integer, db.ForeignKey('organizations.id'), nullable=False)
+    affiliation_type = db.Column(db.Enum('primary', 'secondary', 'association', 'denomination'), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    user = db.relationship('User', backref=db.backref('org_affiliations', lazy=True))
+    organization = db.relationship('Organization', backref=db.backref('user_affiliations', lazy=True))
+
+    def __repr__(self):
+        return f'<UserOrgAffiliation user_id={self.user_id} org_id={self.organization_id} type={self.affiliation_type}>'
+
+
 class SurveyTemplateVersion(db.Model):
     __tablename__ = 'survey_template_versions'
     id = db.Column(db.Integer, primary_key=True)
@@ -1850,6 +1918,33 @@ class UserOrganizationTitle(db.Model):
 
     def __repr__(self):
         return f'<UserOrganizationTitle user_id={self.user_id} org_id={self.organization_id} title_id={self.title_id}>'
+
+
+class RoleRequest(db.Model):
+    """
+    Stores role access requests from users.
+    Admin/Root users can approve or deny these requests.
+    """
+    __tablename__ = 'role_requests'
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    requested_role_id = db.Column(db.Integer, db.ForeignKey('roles.id'), nullable=False)
+    organization_id = db.Column(db.Integer, db.ForeignKey('organizations.id'), nullable=False)
+    status = db.Column(db.Enum('pending', 'approved', 'denied'), nullable=False, default='pending')
+    reason = db.Column(db.Text, nullable=True)
+    reviewed_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    reviewed_at = db.Column(db.DateTime, nullable=True)
+    review_note = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, server_default=db.func.current_timestamp())
+    updated_at = db.Column(db.DateTime, server_default=db.func.current_timestamp(), onupdate=db.func.current_timestamp())
+
+    user = db.relationship('User', foreign_keys=[user_id], backref=db.backref('role_requests', lazy=True))
+    requested_role = db.relationship('Role', backref=db.backref('role_requests', lazy=True))
+    organization = db.relationship('Organization', backref=db.backref('role_requests', lazy=True))
+    reviewer = db.relationship('User', foreign_keys=[reviewed_by])
+
+    def __repr__(self):
+        return f'<RoleRequest user_id={self.user_id} role_id={self.requested_role_id} status={self.status}>'
 
 
 # Legacy alias removed - use UserOrganizationTitle directly
@@ -2069,6 +2164,81 @@ class EmailTemplate(db.Model):
     def __repr__(self):
         return f'<EmailTemplate {self.id}: {self.name}>'
 """
+
+# ============================================================================
+# SURVEYS V2 MODELS
+# ============================================================================
+
+class SurveyV2(db.Model):
+    __tablename__ = 'surveys_v2'
+
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(200), nullable=False)
+    description = db.Column(db.Text, nullable=True)
+    title_id = db.Column(db.Integer, db.ForeignKey('titles.id'), nullable=True)
+    sections = db.Column(JSON, nullable=True)
+    questions = db.Column(JSON, nullable=False)
+    status = db.Column(db.String(20), default='draft')
+    start_date = db.Column(db.DateTime, nullable=True)
+    end_date = db.Column(db.DateTime, nullable=True)
+    created_at = db.Column(db.DateTime, server_default=db.func.current_timestamp())
+    updated_at = db.Column(db.DateTime, server_default=db.func.current_timestamp(),
+                           onupdate=db.func.current_timestamp())
+
+    title = db.relationship('Title', backref=db.backref('surveys_v2', lazy=True))
+    organizations = db.relationship(
+        'SurveyOrganization', backref='survey', lazy=True, cascade='all, delete-orphan'
+    )
+
+
+class SurveyOrganization(db.Model):
+    __tablename__ = 'survey_organizations'
+
+    id = db.Column(db.Integer, primary_key=True)
+    survey_id = db.Column(db.Integer, db.ForeignKey('surveys_v2.id'), nullable=False)
+    organization_id = db.Column(db.Integer, db.ForeignKey('organizations.id'), nullable=False)
+    created_at = db.Column(db.DateTime, server_default=db.func.current_timestamp())
+
+    __table_args__ = (
+        UniqueConstraint('survey_id', 'organization_id', name='uq_survey_organization'),
+    )
+
+    organization = db.relationship('Organization', backref=db.backref('survey_links', lazy=True))
+
+
+class SurveyResponseV2(db.Model):
+    __tablename__ = 'survey_responses_v2'
+
+    id = db.Column(db.Integer, primary_key=True)
+    survey_id = db.Column(db.Integer, db.ForeignKey('surveys_v2.id'), nullable=False)
+    organization_id = db.Column(db.Integer, db.ForeignKey('organizations.id'), nullable=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    answers = db.Column(JSON, nullable=True)
+    status = db.Column(db.String(20), default='draft')
+    start_date = db.Column(db.DateTime, nullable=True)
+    end_date = db.Column(db.DateTime, nullable=True)
+    created_at = db.Column(db.DateTime, server_default=db.func.current_timestamp())
+    updated_at = db.Column(db.DateTime, server_default=db.func.current_timestamp(),
+                           onupdate=db.func.current_timestamp())
+
+    survey = db.relationship('SurveyV2', backref=db.backref('responses', lazy=True))
+    organization = db.relationship('Organization', backref=db.backref('survey_responses_v2', lazy=True))
+    user = db.relationship('User', backref=db.backref('survey_responses_v2', lazy=True))
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'survey_id': self.survey_id,
+            'organization_id': self.organization_id,
+            'user_id': self.user_id,
+            'answers': self.answers,
+            'status': self.status,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+            'start_date': self.start_date.isoformat() if self.start_date else None,
+            'end_date': self.end_date.isoformat() if self.end_date else None,
+        }
+
 
 # Routes
 
@@ -3213,16 +3383,31 @@ def add_template():
 @app.route('/api/templates/<int:template_id>', methods=['GET'])
 def get_template(template_id):
     template = SurveyTemplate.query.get_or_404(template_id)
+
+    # Calculate survey performance metrics
+    all_responses = SurveyResponse.query.filter_by(template_id=template.id).all()
+    invitation_count = len(all_responses)
+    response_count = len([r for r in all_responses if r.status == 'completed'])
+
     return jsonify({
         "id": template.id,
         "version_id": template.version_id,
         "version_name": template.version.name,
         "survey_code": template.survey_code,
+        "name": template.survey_code,
+        "description": template.version.description if template.version else None,
+        "organization_id": template.version.organization_id if template.version else None,
+        "organization_name": template.version.organization.name if template.version and template.version.organization else None,
         "title_id": template.title_id,
         "title_name": template.title.name if template.title else None,
         "questions": template.questions,
         "sections": template.sections,
-        "created_at": template.created_at
+        "invitation_count": invitation_count,
+        "response_count": response_count,
+        "reminder_count": 0,
+        "created_at": template.created_at.isoformat() if template.created_at else None,
+        "start_date": template.created_at.isoformat() if hasattr(template.created_at, 'isoformat') else str(template.created_at) if template.created_at else None,
+        "end_date": "2099-12-31"
     }), 200
 
 
@@ -3463,17 +3648,51 @@ def copy_template_to_organization(template_id):
 # Survey Responses API Endpoints
 @app.route('/api/responses', methods=['GET'])
 def get_responses():
-    responses = SurveyResponse.query.all()
-    return jsonify([{
-        "id": r.id,
-        "template_id": r.template_id,
-        "user_id": r.user_id,
-        "status": r.status,
-        "survey_code": r.survey_code,
-        "start_date": r.start_date.isoformat() if r.start_date else None,
-        "end_date": r.end_date.isoformat() if r.end_date else None,
-        "created_at": r.created_at
-    } for r in responses]), 200
+    template_id = request.args.get('template_id', type=int)
+    user_id_filter = request.args.get('user_id', type=int)
+    status_filter = request.args.get('status')
+
+    query = SurveyResponse.query
+    if template_id:
+        query = query.filter_by(template_id=template_id)
+    if user_id_filter:
+        query = query.filter_by(user_id=user_id_filter)
+    if status_filter:
+        query = query.filter_by(status=status_filter)
+
+    responses = query.all()
+
+    result = []
+    for r in responses:
+        data = {
+            "id": r.id,
+            "template_id": r.template_id,
+            "user_id": r.user_id,
+            "status": r.status,
+            "survey_code": r.survey_code,
+            "start_date": r.start_date.isoformat() if r.start_date else None,
+            "end_date": r.end_date.isoformat() if r.end_date else None,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+            "updated_at": r.updated_at.isoformat() if r.updated_at else None,
+        }
+        # Include user details for display
+        if r.user:
+            name = f"{r.user.firstname or ''} {r.user.lastname or ''}".strip()
+            data['user_name'] = name or r.user.username
+            data['user_email'] = r.user.email
+        # Calculate progress from answers
+        if r.answers and isinstance(r.answers, dict) and len(r.answers) > 0 and r.template:
+            total_questions = len(r.template.question_list) if hasattr(r.template, 'question_list') else 0
+            answered = len(r.answers)
+            data['progress'] = round((answered / total_questions) * 100) if total_questions > 0 else 0
+        else:
+            data['progress'] = 100 if r.status == 'completed' else 0
+        # Map submitted_at from updated_at when completed
+        if r.status == 'completed':
+            data['submitted_at'] = r.updated_at.isoformat() if r.updated_at else None
+        result.append(data)
+
+    return jsonify(result), 200
 
 
 @app.route('/api/templates/<int:template_id>/responses', methods=['POST'])
@@ -6623,8 +6842,8 @@ def get_users_with_role_user():
                 'address_line1': user.geo_location.address_line1 if user.geo_location else None,
                 'address_line2': user.geo_location.address_line2 if user.geo_location else None,
                 'postal_code': user.geo_location.postal_code if user.geo_location else None,
-                'latitude': float(user.geo_location.latitude) if user.geo_location else 0,
-                'longitude': float(user.geo_location.longitude) if user.geo_location else 0
+                'latitude': float(user.geo_location.latitude) if user.geo_location and user.geo_location.latitude is not None else 0,
+                'longitude': float(user.geo_location.longitude) if user.geo_location and user.geo_location.longitude is not None else 0
             },
             'survey_code': user.survey_code,  # Include survey code for sharing with respondents
             'organization': {
@@ -6645,8 +6864,8 @@ def get_users_with_role_user():
                     'address_line1': user.organization.geo_location.address_line1 if user.organization and user.organization.geo_location else None,
                     'address_line2': user.organization.geo_location.address_line2 if user.organization and user.organization.geo_location else None,
                     'postal_code': user.organization.geo_location.postal_code if user.organization and user.organization.geo_location else None,
-                    'latitude': float(user.organization.geo_location.latitude) if user.organization and user.organization.geo_location else 0,
-                    'longitude': float(user.organization.geo_location.longitude) if user.organization and user.organization.geo_location else 0
+                    'latitude': float(user.organization.geo_location.latitude) if user.organization and user.organization.geo_location and user.organization.geo_location.latitude is not None else 0,
+                    'longitude': float(user.organization.geo_location.longitude) if user.organization and user.organization.geo_location and user.organization.geo_location.longitude is not None else 0
                 },
                 'website': user.organization.website,
                 'denomination_affiliation': user.organization.details.get('denomination_affiliation') if user.organization.details else None,
@@ -14176,6 +14395,309 @@ def migrate_referrers_db():
 # ============================================================================
 from audience_routes import register_audience_routes
 register_audience_routes(app, db)
+
+# ============================================================================
+# REGISTER SURVEYS V2 ROUTES
+# ============================================================================
+from surveys_v2_routes import register_surveys_v2_routes
+register_surveys_v2_routes(app, db)
+
+# ============================================================================
+# REGISTER SURVEY RESPONSES V2 ROUTES
+# ============================================================================
+from survey_responses_v2_routes import register_survey_responses_v2_routes
+register_survey_responses_v2_routes(app, db)
+
+# ============================================================================
+# REGISTER REMINDER SETTINGS ROUTES
+# ============================================================================
+from reminder_settings_routes import register_reminder_settings_routes
+register_reminder_settings_routes(app, db)
+
+# ============================================================================
+# REGISTER ROLE REQUEST ROUTES
+# ============================================================================
+from role_request_routes import register_role_request_routes
+register_role_request_routes(app, db)
+
+# ============================================================================
+# REGISTER KPI DASHBOARD ROUTES
+# ============================================================================
+from kpi_dashboard_routes import register_kpi_dashboard_routes
+register_kpi_dashboard_routes(app, db)
+
+# ============================================================================
+# SIGNUP & ONBOARDING ROUTES
+# ============================================================================
+
+@app.route('/api/auth/check-email', methods=['POST'])
+def check_email():
+    """Check whether an email already has an account."""
+    data = request.get_json() or {}
+    email = (data.get('email') or '').strip().lower()
+    if not email:
+        return jsonify({"error": "Email is required"}), 400
+    exists = User.query.filter(db.func.lower(User.email) == email).first() is not None
+    return jsonify({"exists": exists}), 200
+
+
+@app.route('/api/auth/signup', methods=['POST'])
+def signup():
+    """
+    Create a new personal (respondent) account from the Sign Up page.
+    Expects JSON { "email": "<email>", "password": "<password>" }
+    The username is derived from the email (part before @).
+    """
+    data = request.get_json() or {}
+    email = (data.get('email') or '').strip().lower()
+    password = data.get('password', '')
+
+    if not email or not password:
+        return jsonify({"error": "Email and password are required"}), 400
+
+    # Duplicate check
+    if User.query.filter(db.func.lower(User.email) == email).first():
+        return jsonify({"error": "An account with this email already exists"}), 409
+
+    # Derive a unique username from the email local part
+    base_username = email.split('@')[0][:48]
+    username = base_username
+    suffix = 1
+    while User.query.filter_by(username=username).first():
+        username = f"{base_username}{suffix}"
+        suffix += 1
+
+    survey_code = str(uuid4())
+
+    try:
+        new_user = User(
+            username=username,
+            email=email,
+            password=password,
+            survey_code=survey_code,
+        )
+        db.session.add(new_user)
+        db.session.flush()
+
+        # Assign default 'user' role
+        role_obj = Role.query.filter_by(name='user').first()
+        if role_obj:
+            stmt = user_roles.insert().values(
+                user_id=new_user.id,
+                role_id=role_obj.id,
+                organization_id=None
+            )
+            db.session.execute(stmt)
+
+        db.session.commit()
+
+        return jsonify({
+            "message": "Account created successfully",
+            "id": new_user.id,
+            "username": new_user.username,
+            "email": new_user.email,
+            "role": "user",
+            "survey_code": survey_code,
+        }), 201
+
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/user-profiles/<int:user_id>', methods=['GET'])
+def get_user_profile(user_id):
+    """Get an existing onboarding profile for resume support."""
+    profile = UserProfile.query.filter_by(user_id=user_id).first()
+    if not profile:
+        return jsonify({}), 200
+
+    # Pull location from geo_locations if linked
+    geo = None
+    if profile.geo_location_id:
+        geo = GeoLocation.query.get(profile.geo_location_id)
+
+    return jsonify({
+        "id": profile.id,
+        "user_id": profile.user_id,
+        "date_of_birth": profile.date_of_birth.isoformat() if profile.date_of_birth else None,
+        "gender": profile.gender,
+        "marital_status": profile.marital_status,
+        "education_level": profile.education_level,
+        "employment_status": profile.employment_status,
+        "country": geo.country if geo else None,
+        "state_province": geo.province if geo else None,
+        "city": geo.city if geo else None,
+        "institutional_role": profile.institutional_role,
+        "institutional_status": profile.institutional_status,
+        "grade_level": profile.grade_level,
+        "program_enrolled": profile.program_enrolled,
+        "department": profile.department,
+        "graduation_year": profile.graduation_year,
+        "church_member_status": profile.church_member_status,
+        "church_role": profile.church_role,
+        "years_affiliated": profile.years_affiliated,
+        "baptized": profile.baptized,
+        "small_group_participation": profile.small_group_participation,
+        "share_survey_responses": profile.share_survey_responses,
+        "share_profile_data": profile.share_profile_data,
+        "comm_pref_email": profile.comm_pref_email,
+        "comm_pref_sms": profile.comm_pref_sms,
+        "comm_pref_announcements": profile.comm_pref_announcements,
+        "onboarding_step": profile.onboarding_step,
+        "onboarding_complete": profile.onboarding_complete,
+    }), 200
+
+
+@app.route('/api/user-profiles/save', methods=['POST'])
+def save_user_profile():
+    """
+    Upsert onboarding profile data for a given step.
+    Accepts any subset of profile fields plus onboarding_step.
+    """
+    data = request.get_json() or {}
+    user_id = data.get('user_id')
+    if not user_id:
+        return jsonify({"error": "user_id is required"}), 400
+
+    try:
+        profile = UserProfile.query.filter_by(user_id=user_id).first()
+        if not profile:
+            profile = UserProfile(user_id=user_id)
+            db.session.add(profile)
+
+        # Step tracking
+        incoming_step = data.get('onboarding_step')
+        if incoming_step and (profile.onboarding_step is None or incoming_step > profile.onboarding_step):
+            profile.onboarding_step = incoming_step
+
+        # Step 1 fields
+        if 'date_of_birth' in data:
+            from datetime import date as date_type
+            dob_str = data['date_of_birth']
+            if dob_str:
+                try:
+                    from datetime import datetime as dt
+                    profile.date_of_birth = dt.strptime(dob_str, '%Y-%m-%d').date()
+                except ValueError:
+                    pass
+            else:
+                profile.date_of_birth = None
+
+        for field in ('gender', 'marital_status', 'education_level', 'employment_status'):
+            if field in data:
+                setattr(profile, field, data[field])
+
+        # Location — store/update in geo_locations and link
+        location_fields = ('country', 'state_province', 'city')
+        has_location = any(f in data for f in location_fields)
+        if has_location:
+            geo = None
+            if profile.geo_location_id:
+                geo = GeoLocation.query.get(profile.geo_location_id)
+            if not geo:
+                geo = GeoLocation(which='user', user_id=user_id)
+                db.session.add(geo)
+                db.session.flush()
+
+            if 'country' in data:
+                geo.country = data['country']
+            if 'state_province' in data:
+                geo.province = data['state_province']
+            if 'city' in data:
+                geo.city = data['city']
+
+            profile.geo_location_id = geo.id
+
+            # Also update users.geo_location_id
+            user = User.query.get(user_id)
+            if user:
+                user.geo_location_id = geo.id
+
+        # Step 3 fields
+        for field in ('institutional_role', 'institutional_status',
+                      'grade_level', 'program_enrolled', 'department', 'graduation_year'):
+            if field in data:
+                setattr(profile, field, data[field])
+
+        # Step 4 fields
+        for field in ('church_member_status', 'church_role',
+                      'years_affiliated', 'baptized', 'small_group_participation'):
+            if field in data:
+                setattr(profile, field, data[field])
+
+        # Step 5 fields
+        for field in ('share_survey_responses', 'share_profile_data',
+                      'comm_pref_email', 'comm_pref_sms', 'comm_pref_announcements'):
+            if field in data:
+                setattr(profile, field, int(bool(data[field])))
+
+        db.session.commit()
+        return jsonify({"message": "Profile saved", "onboarding_step": profile.onboarding_step}), 200
+
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/user-profiles/affiliations', methods=['POST'])
+def save_user_affiliations():
+    """
+    Replace all org affiliations for a user.
+    Expects { "user_id": <int>, "affiliations": [{ "organization_id": <int>, "affiliation_type": "<str>" }] }
+    """
+    data = request.get_json() or {}
+    user_id = data.get('user_id')
+    affiliations = data.get('affiliations', [])
+
+    if not user_id:
+        return jsonify({"error": "user_id is required"}), 400
+
+    try:
+        # Delete existing affiliations for this user
+        UserOrgAffiliation.query.filter_by(user_id=user_id).delete()
+
+        for aff in affiliations:
+            org_id = aff.get('organization_id')
+            aff_type = aff.get('affiliation_type')
+            if org_id and aff_type:
+                db.session.add(UserOrgAffiliation(
+                    user_id=user_id,
+                    organization_id=org_id,
+                    affiliation_type=aff_type,
+                ))
+
+        db.session.commit()
+        return jsonify({"message": "Affiliations saved"}), 200
+
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/user-profiles/complete', methods=['POST'])
+def complete_onboarding():
+    """Mark onboarding as complete for a user."""
+    data = request.get_json() or {}
+    user_id = data.get('user_id')
+    if not user_id:
+        return jsonify({"error": "user_id is required"}), 400
+
+    try:
+        profile = UserProfile.query.filter_by(user_id=user_id).first()
+        if not profile:
+            profile = UserProfile(user_id=user_id)
+            db.session.add(profile)
+
+        profile.onboarding_complete = 1
+        profile.onboarding_step = 5
+        db.session.commit()
+        return jsonify({"message": "Onboarding complete"}), 200
+
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 500
+
 
 if __name__ == '__main__':
     app.run(debug=False)

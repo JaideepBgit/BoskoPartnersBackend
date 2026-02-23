@@ -9,6 +9,7 @@ from flask import jsonify, request
 from sqlalchemy import text
 import logging
 import traceback
+import json
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -16,8 +17,19 @@ logger = logging.getLogger(__name__)
 def register_audience_routes(app, db):
     """Register all audience-related routes with the Flask app"""
     
-    # Import models (assuming they're defined in app.py)
-    from app import User, Organization, OrganizationType, SurveyResponse
+    # Import models from the running app module (loaded as __main__) to avoid
+    # re-importing app.py which would create a second SQLAlchemy instance.
+    import sys
+    app_module = sys.modules.get('__main__')
+    if not app_module or not hasattr(app_module, 'User'):
+        app_module = sys.modules.get('app')
+    if not app_module or not hasattr(app_module, 'User'):
+        raise RuntimeError("app module not found")
+
+    User = app_module.User
+    Organization = app_module.Organization
+    OrganizationType = app_module.OrganizationType
+    SurveyResponse = app_module.SurveyResponse
     
     # ========================================================================
     # AUDIENCE CRUD OPERATIONS
@@ -100,6 +112,7 @@ def register_audience_routes(app, db):
                 'description': result.description,
                 'audience_type': result.audience_type,
                 'filter_criteria': result.filter_criteria,
+                'filters': result.filter_criteria,  # frontend reads this field
                 'created_by': result.created_by,
                 'created_at': result.created_at.isoformat() if result.created_at else None,
                 'updated_at': result.updated_at.isoformat() if result.updated_at else None
@@ -154,22 +167,37 @@ def register_audience_routes(app, db):
             
             if not data.get('audience_type'):
                 return jsonify({'error': 'Audience type is required'}), 400
-            
+
             if not data.get('created_by'):
                 return jsonify({'error': 'created_by user ID is required'}), 400
-            
+
+            # Normalize frontend tab keys to DB ENUM values
+            audience_type_map = {
+                'member': 'users',
+                'organization': 'organizations',
+                'behavior': 'mixed',
+            }
+            audience_type = audience_type_map.get(data['audience_type'], data['audience_type'])
+
             # Insert audience
             insert_query = text("""
                 INSERT INTO audiences (name, description, created_by, audience_type, filter_criteria)
                 VALUES (:name, :description, :created_by, :audience_type, :filter_criteria)
             """)
             
+            raw_filters = data.get('filters') or data.get('filter_criteria')
+            if isinstance(raw_filters, str):
+                try:
+                    raw_filters = json.loads(raw_filters)
+                except (ValueError, TypeError):
+                    raw_filters = None
+
             result = db.session.execute(insert_query, {
                 'name': data['name'],
                 'description': data.get('description'),
                 'created_by': data['created_by'],
-                'audience_type': data['audience_type'],
-                'filter_criteria': data.get('filter_criteria')
+                'audience_type': audience_type,
+                'filter_criteria': json.dumps(raw_filters) if raw_filters else None
             })
             
             db.session.commit()
@@ -245,12 +273,26 @@ def register_audience_routes(app, db):
                 WHERE id = :audience_id
             """)
             
+            audience_type_map = {
+                'member': 'users',
+                'organization': 'organizations',
+                'behavior': 'mixed',
+            }
+            audience_type = audience_type_map.get(data.get('audience_type', ''), data.get('audience_type'))
+
+            raw_filters = data.get('filters') or data.get('filter_criteria')
+            if isinstance(raw_filters, str):
+                try:
+                    raw_filters = json.loads(raw_filters)
+                except (ValueError, TypeError):
+                    raw_filters = None
+
             db.session.execute(update_query, {
                 'audience_id': audience_id,
                 'name': data['name'],
                 'description': data.get('description'),
-                'audience_type': data['audience_type'],
-                'filter_criteria': data.get('filter_criteria')
+                'audience_type': audience_type,
+                'filter_criteria': json.dumps(raw_filters) if raw_filters else None
             })
             
             # Update user IDs
@@ -518,6 +560,134 @@ def register_audience_routes(app, db):
             return jsonify({'error': f'Failed to filter survey responses: {str(e)}'}), 500
     
     # ========================================================================
+    # AUDIENCE SIZE ESTIMATION
+    # ========================================================================
+    
+    @app.route('/api/audiences/estimate-size', methods=['POST'])
+    def estimate_audience_size():
+        """Estimate the number of users matching the given audience filters.
+        When no filters are provided, returns the total user count."""
+        try:
+            data = request.get_json() or {}
+            filters = data.get('filters', {})
+            
+            # Start with a base query counting distinct users
+            base_query = """
+                SELECT COUNT(DISTINCT u.id) as total_count
+                FROM users u
+                LEFT JOIN organizations o ON u.organization_id = o.id
+                LEFT JOIN organization_types ot ON o.type = ot.id
+                LEFT JOIN geo_locations gl ON u.geo_location_id = gl.id
+            """
+            
+            conditions = []
+            params = {}
+            
+            # --- MEMBER FILTERS ---
+            
+            # Organization filter (primary_organization)
+            if filters.get('primary_organization'):
+                conditions.append("u.organization_id = :primary_org")
+                params['primary_org'] = filters['primary_organization']
+            
+            # Geo location filters
+            if filters.get('continent'):
+                conditions.append("gl.continent = :continent")
+                params['continent'] = filters['continent']
+            
+            if filters.get('country'):
+                conditions.append("gl.country = :country")
+                params['country'] = filters['country']
+            
+            if filters.get('state'):
+                conditions.append("gl.province = :state")
+                params['state'] = filters['state']
+            
+            if filters.get('region'):
+                conditions.append("gl.region = :region")
+                params['region'] = filters['region']
+            
+            # --- ORGANIZATION FILTERS ---
+            
+            # Organization type filter — match users whose org has this type
+            if filters.get('org_type_filter'):
+                conditions.append("""
+                    u.organization_id IN (
+                        SELECT o2.id FROM organizations o2
+                        JOIN organization_types ot2 ON o2.type = ot2.id
+                        WHERE LOWER(ot2.type) LIKE :org_type
+                    )
+                """)
+                params['org_type'] = f"%{filters['org_type_filter'].lower()}%"
+            
+            # Organization status
+            if filters.get('org_status'):
+                if filters['org_status'] == 'active':
+                    conditions.append("o.id IS NOT NULL")
+                # inactive filtering would need an org status column
+            
+            # --- BEHAVIOR FILTERS ---
+            
+            # Completed survey filter
+            if filters.get('completed_survey'):
+                conditions.append("""
+                    u.id IN (
+                        SELECT sr.user_id FROM survey_responses sr 
+                        WHERE sr.template_id = :completed_survey 
+                        AND sr.status = 'completed'
+                    )
+                """)
+                params['completed_survey'] = filters['completed_survey']
+            
+            # Not completed survey filter
+            if filters.get('not_completed_survey'):
+                conditions.append("""
+                    u.id NOT IN (
+                        SELECT sr.user_id FROM survey_responses sr 
+                        WHERE sr.template_id = :not_completed_survey 
+                        AND sr.status = 'completed'
+                    )
+                """)
+                params['not_completed_survey'] = filters['not_completed_survey']
+            
+            # Responded within N days
+            if filters.get('responded_within'):
+                conditions.append("""
+                    u.id IN (
+                        SELECT sr.user_id FROM survey_responses sr 
+                        WHERE sr.submitted_at >= DATE_SUB(NOW(), INTERVAL :days DAY)
+                    )
+                """)
+                params['days'] = int(filters['responded_within'])
+            
+            # Build final query
+            if conditions:
+                base_query += " WHERE " + " AND ".join(conditions)
+            
+            result = db.session.execute(text(base_query), params)
+            row = result.fetchone()
+            total_count = row.total_count if row else 0
+            
+            # Also get total user count for percentage calculation
+            total_result = db.session.execute(text("SELECT COUNT(*) as total FROM users"))
+            total_row = total_result.fetchone()
+            total_users = total_row.total if total_row else 0
+            
+            logger.info(f"Audience size estimate: {total_count} / {total_users} users (filters: {len(filters)} applied)")
+            
+            return jsonify({
+                'estimated_size': total_count,
+                'total_users': total_users,
+                'filters_applied': len(filters),
+                'percentage': round((total_count / total_users * 100), 1) if total_users > 0 else 0
+            }), 200
+            
+        except Exception as e:
+            logger.error(f"Error estimating audience size: {str(e)}")
+            logger.error(traceback.format_exc())
+            return jsonify({'error': f'Failed to estimate audience size: {str(e)}'}), 500
+    
+    # ========================================================================
     # SEND REMINDERS TO AUDIENCE
     # ========================================================================
     
@@ -550,7 +720,7 @@ def register_audience_routes(app, db):
                 users_for_reminder.append(user_data)
             
             # Use existing bulk reminder endpoint logic
-            from app import send_reminder_email
+            send_reminder_email = app_module.send_reminder_email
             
             results = {
                 'total_users': len(users_for_reminder),
