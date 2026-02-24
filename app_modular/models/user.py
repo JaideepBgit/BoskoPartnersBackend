@@ -199,7 +199,7 @@ class UserProfile(db.Model):
     updated_at = db.Column(db.DateTime, server_default=db.func.current_timestamp(),
                            onupdate=db.func.current_timestamp())
 
-    user = db.relationship('User', backref=db.backref('profile', uselist=False, lazy=True))
+    user = db.relationship('User', backref=db.backref('profile', uselist=False, lazy=True, cascade='all, delete-orphan'))
 
     def __repr__(self):
         return f'<UserProfile user_id={self.user_id}>'

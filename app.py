@@ -1740,7 +1740,7 @@ class UserProfile(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    user = db.relationship('User', backref=db.backref('profile', uselist=False, lazy=True))
+    user = db.relationship('User', backref=db.backref('profile', uselist=False, lazy=True, cascade='all, delete-orphan'))
     geo_location = db.relationship('GeoLocation', foreign_keys=[geo_location_id])
 
     def __repr__(self):

@@ -188,6 +188,66 @@ def get_user_survey_response(user_id, survey_id):
     return jsonify(response.to_dict()), 200
 
 
+@survey_responses_v2_bp.route('/v2/surveys/<int:survey_id>/join', methods=['POST'])
+def join_survey(survey_id):
+    """Self-assign a user to a survey via shareable link / QR code.
+
+    Idempotent: returns the existing response if the user already has one.
+    """
+    from ..models.user import User
+
+    data = request.json or {}
+    user_id = data.get('user_id')
+
+    if not user_id:
+        return jsonify({"error": "user_id is required"}), 400
+
+    survey = SurveyV2.query.get(survey_id)
+    if not survey:
+        return jsonify({"error": "Survey not found"}), 404
+
+    if survey.status not in ('open', 'draft'):
+        return jsonify({"error": "This survey is no longer accepting responses"}), 403
+
+    user = User.query.get(user_id)
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+
+    try:
+        # Idempotent — return existing response if one exists
+        existing = SurveyResponseV2.query.filter_by(
+            survey_id=survey_id,
+            user_id=user_id
+        ).first()
+
+        if existing:
+            response_data = existing.to_dict()
+        else:
+            new_response = SurveyResponseV2(
+                survey_id=survey_id,
+                user_id=user_id,
+                organization_id=user.organization_id,
+                answers={},
+                status='pending',
+                start_date=datetime.utcnow()
+            )
+            db.session.add(new_response)
+            db.session.commit()
+            response_data = new_response.to_dict()
+
+        # Include survey details the frontend needs
+        response_data['survey_name'] = survey.name
+        response_data['survey_description'] = survey.description
+        response_data['questions_count'] = len(survey.questions) if isinstance(survey.questions, list) else 0
+
+        return jsonify(response_data), 200
+
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error joining survey {survey_id}: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+
 @survey_responses_v2_bp.route('/v2/users/<int:user_id>/responses', methods=['GET'])
 def get_user_responses(user_id):
     """Get all survey responses for a specific user."""
