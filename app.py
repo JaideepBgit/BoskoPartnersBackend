@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, g, make_response
+from flask import Flask, request, jsonify, g, make_response, send_from_directory
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
 from sqlalchemy.dialects.mysql import JSON
@@ -1661,6 +1661,7 @@ class User(db.Model):
     survey_code = db.Column(db.String(36), nullable=True)  # UUID as string for user surveys
     geo_location_id = db.Column(db.Integer, db.ForeignKey('geo_locations.id'), nullable=True)
     phone = db.Column(db.String(20), nullable=True)  # Added for contact information
+    avatar_url = db.Column(db.String(500), nullable=True)
 
     created_at = db.Column(db.DateTime, server_default=db.func.current_timestamp())
     updated_at = db.Column(db.DateTime, server_default=db.func.current_timestamp(), onupdate=db.func.current_timestamp())
@@ -6022,7 +6023,8 @@ def get_user(user_id):
         'lastname': user.lastname,
         'organization_id': user.organization_id,
         'template_id': template_id,  # Include template_id from survey response
-        'has_survey_assigned': bool(survey_response)
+        'has_survey_assigned': bool(survey_response),
+        'avatar_url': user.avatar_url
     }
     return jsonify(result)
 
@@ -6628,6 +6630,77 @@ def update_user(user_id):
         response_data['display_role'] = requested_role  # This is what the UI should display
     
     return jsonify(response_data)
+
+
+# Avatar upload constants
+ALLOWED_AVATAR_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
+MAX_AVATAR_SIZE = 5 * 1024 * 1024  # 5MB
+
+
+def _allowed_avatar_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_AVATAR_EXTENSIONS
+
+
+@app.route('/api/users/<int:user_id>/avatar', methods=['POST'])
+def upload_avatar(user_id):
+    """Upload a profile avatar image for a user."""
+    user = User.query.get_or_404(user_id)
+
+    if 'file' not in request.files:
+        return jsonify({"error": "No file provided"}), 400
+
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({"error": "No file selected"}), 400
+
+    if not _allowed_avatar_file(file.filename):
+        return jsonify({"error": "File type not allowed. Use png, jpg, jpeg, gif, or webp"}), 400
+
+    # Check file size
+    file.seek(0, os.SEEK_END)
+    size = file.tell()
+    file.seek(0)
+    if size > MAX_AVATAR_SIZE:
+        return jsonify({"error": "File too large. Maximum size is 5MB"}), 400
+
+    try:
+        upload_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'uploads', 'avatars')
+        os.makedirs(upload_dir, exist_ok=True)
+
+        ext = file.filename.rsplit('.', 1)[1].lower()
+        filename = f"{user_id}_{uuid.uuid4().hex[:8]}.{ext}"
+        filepath = os.path.join(upload_dir, filename)
+
+        # Remove old avatar file if it exists
+        if user.avatar_url:
+            old_filename = user.avatar_url.rsplit('/', 1)[-1]
+            old_path = os.path.join(upload_dir, old_filename)
+            if os.path.exists(old_path):
+                os.remove(old_path)
+
+        file.save(filepath)
+
+        avatar_url = f"/uploads/avatars/{filename}"
+        user.avatar_url = avatar_url
+        db.session.commit()
+
+        return jsonify({
+            "message": "Avatar uploaded successfully",
+            "avatar_url": avatar_url
+        }), 200
+
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error uploading avatar: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/uploads/avatars/<path:filename>', methods=['GET'])
+def serve_avatar(filename):
+    """Serve uploaded avatar files."""
+    upload_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'uploads', 'avatars')
+    return send_from_directory(upload_dir, filename)
+
 
 @app.route('/api/users/<int:user_id>', methods=['DELETE'])
 def delete_user(user_id):

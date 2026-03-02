@@ -9,7 +9,7 @@ import os
 import uuid
 
 from ..config.database import db
-from ..models.user import User, UserDetails, Role, UserOrganizationTitle, Title
+from ..models.user import User, UserDetails, Role, UserOrganizationTitle, Title, user_roles
 from ..models.organization import Organization
 from ..models.geo_location import GeoLocation
 from ..utils.helpers import validate_user_role, generate_survey_code
@@ -513,6 +513,41 @@ def get_user_organizational_titles(user_id):
         } for t in titles]), 200
     except Exception as e:
         logger.error(f"Error getting user organizational titles: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+
+@users_bp.route('/users/<int:user_id>/organizations', methods=['GET'])
+def get_user_organizations(user_id):
+    """Get all organizations a user belongs to via user_roles."""
+    try:
+        results = db.session.query(
+            user_roles.c.organization_id,
+            Role.name.label('role_name'),
+            Organization.name.label('organization_name')
+        ).join(
+            Role, user_roles.c.role_id == Role.id
+        ).outerjoin(
+            Organization, user_roles.c.organization_id == Organization.id
+        ).filter(
+            user_roles.c.user_id == user_id
+        ).all()
+
+        # Deduplicate by organization — group roles per org
+        org_map = {}
+        for row in results:
+            org_id = row.organization_id
+            if org_id not in org_map:
+                org_map[org_id] = {
+                    "organization_id": org_id,
+                    "organization_name": row.organization_name or "Global",
+                    "roles": []
+                }
+            if row.role_name not in org_map[org_id]["roles"]:
+                org_map[org_id]["roles"].append(row.role_name)
+
+        return jsonify(list(org_map.values())), 200
+    except Exception as e:
+        logger.error(f"Error getting user organizations: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
 

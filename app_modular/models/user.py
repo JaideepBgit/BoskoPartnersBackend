@@ -16,10 +16,12 @@ class Title(db.Model):
         return f'<Title {self.name}>'
 
 
-# Association table for User-Role (Many-to-Many)
+# Association table for User-Role (Many-to-Many, with organization context)
 user_roles = db.Table('user_roles',
-    db.Column('user_id', db.Integer, db.ForeignKey('users.id'), primary_key=True),
-    db.Column('role_id', db.Integer, db.ForeignKey('roles.id'), primary_key=True)
+    db.Column('id', db.BigInteger, primary_key=True, autoincrement=True),
+    db.Column('user_id', db.Integer, db.ForeignKey('users.id'), nullable=False),
+    db.Column('role_id', db.Integer, db.ForeignKey('roles.id'), nullable=False),
+    db.Column('organization_id', db.Integer, db.ForeignKey('organizations.id'), nullable=True),
 )
 
 # Association table for User-Title (Many-to-Many, global titles)
