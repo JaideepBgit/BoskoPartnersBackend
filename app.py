@@ -1401,7 +1401,9 @@ CORS(
                 "http://3.142.171.30",       # your EC2-served frontend
                 "http://18.222.89.189",
                 "https://saurara.org",       # production domain
-                "http://saurara.org"         # production domain (http fallback)
+                "http://saurara.org",         # production domain (http fallback)
+                "http://localhost:3002",
+                "http://localhost:3001"
             ],
             "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
         }

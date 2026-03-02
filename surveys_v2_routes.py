@@ -40,11 +40,30 @@ def register_surveys_v2_routes(app, db):
     def get_surveys_v2():
         try:
             surveys = SurveyV2.query.all()
+
+            # Batch-fetch response/invitation counts for all surveys
+            counts_rows = db.session.execute(text(
+                "SELECT survey_id, COUNT(*) AS total, "
+                "SUM(CASE WHEN status IN ('submitted','completed') THEN 1 ELSE 0 END) AS completed "
+                "FROM survey_responses_v2 GROUP BY survey_id"
+            )).fetchall()
+            counts_map = {row[0]: {"invitation_count": row[1], "response_count": row[2]} for row in counts_rows}
+
             result = []
             for s in surveys:
-                org_names = [so.organization.name for so in s.organizations if so.organization]
+                orgs = [so.organization for so in s.organizations if so.organization]
+                org_names = [o.name for o in orgs]
                 org_ids = [so.organization_id for so in s.organizations]
+
+                # Get denomination from the first organization's details
+                denomination = None
+                for o in orgs:
+                    if o.details and o.details.get('denomination_affiliation'):
+                        denomination = o.details['denomination_affiliation']
+                        break
+
                 questions = s.questions if s.questions else []
+                survey_counts = counts_map.get(s.id, {"invitation_count": 0, "response_count": 0})
                 result.append({
                     "id": s.id,
                     "name": s.name,
@@ -58,6 +77,9 @@ def register_surveys_v2_routes(app, db):
                     "organization_ids": org_ids,
                     "organization_names": org_names,
                     "organization_name": org_names[0] if org_names else None,
+                    "denomination": denomination,
+                    "invitation_count": survey_counts["invitation_count"],
+                    "response_count": survey_counts["response_count"],
                     "start_date": s.start_date.isoformat() if s.start_date else None,
                     "end_date": s.end_date.isoformat() if s.end_date else None,
                     "created_at": s.created_at.isoformat() if s.created_at else None,

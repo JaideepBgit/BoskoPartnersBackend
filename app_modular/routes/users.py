@@ -1,10 +1,12 @@
 """
 User management routes.
 """
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, send_from_directory, current_app
 import logging
 import secrets
 import json
+import os
+import uuid
 
 from ..config.database import db
 from ..models.user import User, UserDetails, Role, UserOrganizationTitle, Title
@@ -41,6 +43,7 @@ def get_all_users():
             "role": user.role,
             "firstname": user.firstname,
             "lastname": user.lastname,
+            "avatar_url": user.avatar_url,
             "organization_id": user.organization_id,
             "organization_name": user.organization.name if user.organization else None,
             "survey_code": user.survey_code,
@@ -50,7 +53,7 @@ def get_all_users():
             "created_at": user.created_at.isoformat() if user.created_at else None,
             "updated_at": user.updated_at.isoformat() if user.updated_at else None
         } for user in users]), 200
-        
+
     except Exception as e:
         logger.error(f"Error getting users: {str(e)}")
         return jsonify({"error": str(e)}), 500
@@ -60,7 +63,7 @@ def get_all_users():
 def get_user(user_id):
     """Get a specific user by ID."""
     user = User.query.get_or_404(user_id)
-    
+
     return jsonify({
         "id": user.id,
         "username": user.username,
@@ -68,6 +71,7 @@ def get_user(user_id):
         "role": user.role,
         "firstname": user.firstname,
         "lastname": user.lastname,
+        "avatar_url": user.avatar_url,
         "organization_id": user.organization_id,
         "organization_name": user.organization.name if user.organization else None,
         "survey_code": user.survey_code,
@@ -230,7 +234,10 @@ def update_user(user_id):
 
         if 'title_id' in data:
             user.title_id = data['title_id']
-            
+
+        if 'avatar_url' in data:
+            user.avatar_url = data['avatar_url']
+
         if 'roles' in data:
             user.roles = []
             for r_name in data['roles']:
@@ -260,6 +267,75 @@ def update_user(user_id):
         db.session.rollback()
         logger.error(f"Error updating user: {str(e)}")
         return jsonify({"error": str(e)}), 500
+
+
+ALLOWED_AVATAR_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
+MAX_AVATAR_SIZE = 5 * 1024 * 1024  # 5MB
+
+
+def _allowed_avatar_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_AVATAR_EXTENSIONS
+
+
+@users_bp.route('/users/<int:user_id>/avatar', methods=['POST'])
+def upload_avatar(user_id):
+    """Upload a profile avatar image for a user."""
+    user = User.query.get_or_404(user_id)
+
+    if 'file' not in request.files:
+        return jsonify({"error": "No file provided"}), 400
+
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({"error": "No file selected"}), 400
+
+    if not _allowed_avatar_file(file.filename):
+        return jsonify({"error": "File type not allowed. Use png, jpg, jpeg, gif, or webp"}), 400
+
+    # Check file size
+    file.seek(0, os.SEEK_END)
+    size = file.tell()
+    file.seek(0)
+    if size > MAX_AVATAR_SIZE:
+        return jsonify({"error": "File too large. Maximum size is 5MB"}), 400
+
+    try:
+        upload_dir = os.path.join(current_app.root_path, '..', 'uploads', 'avatars')
+        os.makedirs(upload_dir, exist_ok=True)
+
+        ext = file.filename.rsplit('.', 1)[1].lower()
+        filename = f"{user_id}_{uuid.uuid4().hex[:8]}.{ext}"
+        filepath = os.path.join(upload_dir, filename)
+
+        # Remove old avatar file if it exists
+        if user.avatar_url:
+            old_filename = user.avatar_url.rsplit('/', 1)[-1]
+            old_path = os.path.join(upload_dir, old_filename)
+            if os.path.exists(old_path):
+                os.remove(old_path)
+
+        file.save(filepath)
+
+        avatar_url = f"/uploads/avatars/{filename}"
+        user.avatar_url = avatar_url
+        db.session.commit()
+
+        return jsonify({
+            "message": "Avatar uploaded successfully",
+            "avatar_url": avatar_url
+        }), 200
+
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error uploading avatar: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+
+@users_bp.route('/uploads/avatars/<path:filename>', methods=['GET'])
+def serve_avatar(filename):
+    """Serve uploaded avatar files."""
+    upload_dir = os.path.join(current_app.root_path, '..', 'uploads', 'avatars')
+    return send_from_directory(upload_dir, filename)
 
 
 @users_bp.route('/users/<int:user_id>', methods=['DELETE'])

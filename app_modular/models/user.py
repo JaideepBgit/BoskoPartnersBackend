@@ -43,6 +43,7 @@ class User(db.Model):
                      nullable=True, default='user')
     firstname = db.Column(db.String(100), nullable=True)
     lastname = db.Column(db.String(100), nullable=True)
+    avatar_url = db.Column(db.String(500), nullable=True)
     survey_code = db.Column(db.String(100), nullable=True)
     geo_location_id = db.Column(db.Integer, db.ForeignKey('geo_locations.id'), nullable=True)
     created_at = db.Column(db.DateTime, server_default=db.func.current_timestamp())
@@ -81,6 +82,7 @@ class User(db.Model):
             'roles': [r.name for r in self.roles],
             'firstname': self.firstname,
             'lastname': self.lastname,
+            'avatar_url': self.avatar_url,
             'survey_code': self.survey_code,
             'geo_location_id': self.geo_location_id,
             'title': self.title.name if self.title else None,
