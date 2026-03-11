@@ -1464,7 +1464,14 @@ DB_NAME = 'boskopartnersdb'
 app.config['SQLALCHEMY_DATABASE_URI'] = f'mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}/{DB_NAME}'
 """
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['SQLALCHEMY_ECHO'] = True  # Log all SQL queries
+app.config['SQLALCHEMY_ECHO'] = False  # Disable SQL logging in production for performance
+
+# Connection pool settings for handling 600+ concurrent users
+app.config['SQLALCHEMY_POOL_SIZE'] = 20          # Base pool connections
+app.config['SQLALCHEMY_MAX_OVERFLOW'] = 30       # Extra connections under heavy load (total max: 50)
+app.config['SQLALCHEMY_POOL_TIMEOUT'] = 30       # Seconds to wait for a connection before error
+app.config['SQLALCHEMY_POOL_RECYCLE'] = 1800     # Recycle connections every 30 min (avoids MySQL timeout)
+app.config['SQLALCHEMY_POOL_PRE_PING'] = True    # Test connections before use (avoids stale connections)
 db = SQLAlchemy(app)
 
 # Function to create tables if they don't exist
